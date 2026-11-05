@@ -1,0 +1,56 @@
+import os
+import sys
+from PySide6.QtGui import QIcon
+
+_app_icon_cache = None
+
+def get_asset_path(filename):
+    """
+    Return the path to an asset, works in both dev and packaged environments.
+    Handles --onedir where sys._MEIPASS is the _internal folder.
+    """
+    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+        base_path = sys._MEIPASS
+    else:
+        base_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+        
+    # If the filename already starts with 'assets', don't duplicate it.
+    normalized_filename = filename.replace('\\', '/')
+    if not normalized_filename.startswith('assets/'):
+        return os.path.join(base_path, 'assets', filename)
+    
+    return os.path.join(base_path, filename)
+
+def get_asset_html_path(filename):
+    """
+    Return the asset path as a proper file:/// URL safe for use inside Qt HTML labels (src= attributes).
+    
+    Qt's HTML renderer does NOT accept Windows-style backslash paths (e.g. C:\\Users\\...) 
+    in src= attributes when running from a frozen .exe. This converts the path to the 
+    correct forward-slash file:/// URL format (e.g. file:///C:/Users/...).
+    """
+    path = get_asset_path(filename)
+    # Convert backslashes to forward slashes and prepend file:///
+    return 'file:///' + path.replace('\\', '/')
+
+def get_app_icon_object():
+    """
+    Loads and caches the application icon from the assets folder.
+    This function is now centralized to prevent circular imports.
+
+    Returns:
+        QIcon: The application icon object.
+    """
+    global _app_icon_cache
+    if _app_icon_cache and not _app_icon_cache.isNull():
+        return _app_icon_cache
+
+    for candidate in ('Pawchive.ico', 'Pawchive.png', 'assets/Svg/paw-print.svg', 'Kemono.ico'):
+        icon_path = get_asset_path(candidate)
+        if os.path.exists(icon_path):
+            _app_icon_cache = QIcon(icon_path)
+            if not _app_icon_cache.isNull():
+                return _app_icon_cache
+
+    _app_icon_cache = QIcon()
+    return _app_icon_cache

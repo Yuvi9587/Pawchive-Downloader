@@ -1,0 +1,17 @@
+PySide6
+requests[socks]
+PySocks
+beautifulsoup4
+cloudscraper
+curl_cffi
+python-docx
+fpdf2
+Pillow
+pycryptodome
+opencv-python
+ImageHash
+numpy
+onnxruntime
+packaging
+gdown
+urllib3
