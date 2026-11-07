@@ -114,6 +114,27 @@ pip install -r requirements.txt
 python main.py
 ```
 
+### 5. Build Standalone Executable (.exe)
+
+To package Pawchive Downloader into a standalone Windows executable with an `_internal` dependency folder (for instant startup and clean organization):
+
+1. Install PyInstaller:
+   ```bash
+   pip install pyinstaller
+   ```
+2. Run the build script:
+   - **Option A (One-click):** Double-click `build_exe.bat`
+   - **Option B (Command Line):**
+     ```bash
+     pyinstaller --clean -y PawchiveDownloader.spec
+     ```
+3. Your distribution will be generated in `dist/Pawchive Downloader/`:
+   ```
+   dist/Pawchive Downloader/
+   ├── Pawchive Downloader.exe   # Application executable
+   └── _internal/                # Bundled libraries, Qt plugins, and assets
+   ```
+
 ---
 
 ## Tips & Configuration
@@ -163,6 +184,8 @@ Pawchive-Downloader/
 │   │   └── visual_sort_tab.py # On-device image clustering tab
 │   └── utils/               # File helpers, hash registers, and theme managers
 ├── LICENSE                  # MIT License
+├── PawchiveDownloader.spec  # PyInstaller standalone configuration
+├── build_exe.bat            # One-click Windows build script
 ├── main.py                  # App entry point
 ├── readme.md                # You're reading it
 └── requirements.txt         # Python dependencies

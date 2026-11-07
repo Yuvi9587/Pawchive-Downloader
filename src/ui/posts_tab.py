@@ -967,6 +967,11 @@ class PostsTabWidget(QWidget):
         creators_path = os.path.join(
             getattr(self.parent_app, 'app_base_dir', '.'), "data", "creators.json"
         )
+        if not os.path.exists(creators_path):
+            from ..utils.file_utils import get_app_base_path
+            bundled_creators = os.path.join(get_app_base_path(), "data", "creators.json")
+            if os.path.exists(bundled_creators):
+                creators_path = bundled_creators
         if os.path.exists(creators_path):
             try:
                 with open(creators_path, "r", encoding="utf-8") as f:

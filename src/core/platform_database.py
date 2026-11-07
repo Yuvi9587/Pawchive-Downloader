@@ -99,9 +99,19 @@ class PlatformDatabaseManager:
         with self.db_lock:
             if creator_id and service:
                 # Fetch ALL mappings for this creator to resolve duplicates
-                self.cursor.execute("SELECT sanitized_table_name, is_synced, sync_settings FROM creator_mappings WHERE creator_id = ? AND service = ?", (str(creator_id), service))
+                self.cursor.execute("SELECT sanitized_table_name, is_synced, sync_settings, original_name FROM creator_mappings WHERE creator_id = ? AND service = ?", (str(creator_id), service))
                 existing_rows = self.cursor.fetchall()
                 
+                # If incoming name is just a numeric ID, preserve existing human-readable name if available
+                is_incoming_numeric = not original_creator_name or original_creator_name == str(creator_id) or str(original_creator_name).isdigit()
+                if is_incoming_numeric and existing_rows:
+                    for r in existing_rows:
+                        existing_name = r[3]
+                        if existing_name and not str(existing_name).isdigit() and existing_name != str(creator_id):
+                            original_creator_name = existing_name
+                            sanitized_name = r[0]
+                            break
+
                 has_new_name_row = any(row[0] == sanitized_name for row in existing_rows)
                 
                 for row in existing_rows:
@@ -212,19 +222,26 @@ class PlatformDatabaseManager:
             ''', (1 if is_synced else 0, str(creator_id)))
             self.conn.commit()
 
-    def update_sync_settings(self, creator_id, service, settings_json):
+    def update_sync_settings(self, creator_id, service, settings_json, creator_name=None):
         """Updates the JSON configuration string used for auto-syncing this creator."""
         # Ensure creator exists in mappings first (important for Link Only/Text Only modes)
         with self.db_lock:
-            self.cursor.execute("SELECT 1 FROM creator_mappings WHERE creator_id = ?", (str(creator_id),))
-            if not self.cursor.fetchone():
-                display_name = str(creator_id)
+            self.cursor.execute("SELECT original_name FROM creator_mappings WHERE creator_id = ?", (str(creator_id),))
+            existing_row = self.cursor.fetchone()
+            if not existing_row:
+                display_name = (creator_name or "").strip() or str(creator_id)
 
                 sanitized_name = self._sanitize_name(display_name)
                 self.cursor.execute('''
                     INSERT INTO creator_mappings (original_name, sanitized_table_name, creator_id, service, is_synced)
                     VALUES (?, ?, ?, ?, 0)
                 ''', (display_name, sanitized_name, str(creator_id), service))
+            elif creator_name:
+                orig = (existing_row[0] or "").strip()
+                if not orig or orig == str(creator_id) or orig.isdigit() or orig.lower() == 'unknown':
+                    self.cursor.execute('''
+                        UPDATE creator_mappings SET original_name = ? WHERE creator_id = ?
+                    ''', (creator_name.strip(), str(creator_id)))
                 
             self.cursor.execute('''
                 UPDATE creator_mappings SET sync_settings = ? WHERE creator_id = ?

@@ -309,15 +309,21 @@ class AutoSyncTabWidget(QWidget):
         # Right Header Badges & Actions
         right_header = QHBoxLayout()
         right_header.setSpacing(int(8 * scale))
+        right_header.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+
+        action_height = int(30 * scale)
 
         self.daemon_badge = QLabel("Daemon Inactive")
+        self.daemon_badge.setFixedHeight(action_height)
+        self.daemon_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.daemon_badge.setStyleSheet(
-            "font-size: 8pt; font-weight: bold; color: #9A9EAA; background-color: #2D3035; "
-            "border: 1px solid #424652; border-radius: 4px; padding: 4px 8px;"
+            f"font-size: 8.5pt; font-weight: bold; color: #9A9EAA; background-color: #2D3035; "
+            f"border: 1px solid #424652; border-radius: 4px; padding: 0px {int(10 * scale)}px;"
         )
         right_header.addWidget(self.daemon_badge)
 
         self.quick_sync_btn = QPushButton(" Run Sync Now")
+        self.quick_sync_btn.setFixedHeight(action_height)
         self.quick_sync_btn.setIcon(QIcon(get_asset_path("assets/Svg/sync.svg")))
         self.quick_sync_btn.setIconSize(QSize(int(14 * scale), int(14 * scale)))
         self.quick_sync_btn.setObjectName("PrimaryButton")
@@ -409,13 +415,13 @@ class AutoSyncTabWidget(QWidget):
         filter_row.setSpacing(int(6 * scale))
 
         self.creator_search_input = QLineEdit()
-        self.creator_search_input.setPlaceholderText("Filter monitored creators by name, ID, or platform...")
+        self.creator_search_input.setPlaceholderText("Filter monitored creators by name, ID, or service...")
         self.creator_search_input.setClearButtonEnabled(True)
         self.creator_search_input.textChanged.connect(self._filter_table_rows)
         filter_row.addWidget(self.creator_search_input, 1)
 
         self.creator_platform_combo = QComboBox()
-        self.creator_platform_combo.addItems(["All Platforms", "Patreon", "Fanbox", "Discord"])
+        self.creator_platform_combo.addItems(["All Services", "Patreon", "Fanbox", "Discord"])
         self.creator_platform_combo.currentTextChanged.connect(self._filter_table_rows)
         filter_row.addWidget(self.creator_platform_combo)
 
@@ -428,20 +434,18 @@ class AutoSyncTabWidget(QWidget):
         layout.addLayout(filter_row)
 
         # Monitored Creators Table
-        self.sync_table = QTableWidget(0, 5)
+        self.sync_table = QTableWidget(0, 4)
         self.sync_table.setHorizontalHeaderLabels([
-            "Sync", "Creator Name", "Platform", "Service", "Output Directory"
+            "Sync", "Creator Name", "Service", "Output Directory"
         ])
         th = self.sync_table.horizontalHeader()
         th.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         th.resizeSection(0, int(60 * scale))
         th.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
-        th.resizeSection(1, int(180 * scale))
+        th.resizeSection(1, int(200 * scale))
         th.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
-        th.resizeSection(2, int(85 * scale))
-        th.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
-        th.resizeSection(3, int(85 * scale))
-        th.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        th.resizeSection(2, int(100 * scale))
+        th.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         th.setStretchLastSection(True)
 
         self.sync_table.verticalHeader().setVisible(False)
@@ -752,6 +756,71 @@ class AutoSyncTabWidget(QWidget):
     #  Data Population & Filtering
     # ─────────────────────────────────────────────────────────────────────────
 
+    def _get_creators_lookup(self) -> dict:
+        """
+        Returns a fast lookup mapping (creator_id, service) and creator_id
+        to human-readable creator names from data/creators.json.
+        """
+        if hasattr(self, '_creators_lookup_cache') and self._creators_lookup_cache:
+            return self._creators_lookup_cache
+
+        lookup = {}
+        # 1. Try creators_tab if already populated
+        creators_tab = getattr(self.parent_app, 'creators_tab', None)
+        cached_creators = getattr(creators_tab, 'all_creators', None) if creators_tab else None
+        if cached_creators:
+            for c in cached_creators:
+                cid = str(c.get('id', '')).strip()
+                svc = (c.get('service') or '').lower().strip()
+                name = (c.get('name') or '').strip()
+                if cid and name:
+                    lookup[(cid, svc)] = name
+                    if cid not in lookup:
+                        lookup[cid] = name
+
+        # 2. Also check parent_app.creator_name_cache
+        main_cache = getattr(self.parent_app, 'creator_name_cache', None)
+        if main_cache:
+            for k, name in main_cache.items():
+                if isinstance(k, tuple) and len(k) == 2:
+                    svc, cid = k
+                    lookup[(str(cid), str(svc).lower())] = name
+                    if str(cid) not in lookup:
+                        lookup[str(cid)] = name
+                elif isinstance(k, str):
+                    lookup[k] = name
+
+        # 3. If lookup is still empty, load data/creators.json directly
+        if not lookup:
+            base_dir = getattr(self.parent_app, 'app_base_dir', '') or os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"))
+            creators_json_path = os.path.join(base_dir, "data", "creators.json")
+            if not os.path.exists(creators_json_path):
+                from ..utils.file_utils import get_app_base_path
+                bundled_creators = os.path.join(get_app_base_path(), "data", "creators.json")
+                if os.path.exists(bundled_creators):
+                    creators_json_path = bundled_creators
+            if os.path.exists(creators_json_path):
+                try:
+                    with open(creators_json_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    if isinstance(data, list) and data and isinstance(data[0], list):
+                        data = data[0]
+                    if isinstance(data, list):
+                        for c in data:
+                            if isinstance(c, dict):
+                                cid = str(c.get('id', '')).strip()
+                                svc = (c.get('service') or '').lower().strip()
+                                name = (c.get('name') or '').strip()
+                                if cid and name:
+                                    lookup[(cid, svc)] = name
+                                    if cid not in lookup:
+                                        lookup[cid] = name
+                except Exception as e:
+                    print(f"Error loading creators.json for auto-sync lookup: {e}")
+
+        self._creators_lookup_cache = lookup
+        return lookup
+
     def _populate_sync_table(self):
         self.sync_table.blockSignals(True)
         self.sync_table.setRowCount(0)
@@ -766,6 +835,8 @@ class AutoSyncTabWidget(QWidget):
             self.sync_table.blockSignals(False)
             return
 
+        lookup = self._get_creators_lookup()
+
         all_creators = []
         for file in os.listdir(db_dir):
             if file.endswith(".db"):
@@ -775,6 +846,27 @@ class AutoSyncTabWidget(QWidget):
                     creators = db_manager.get_all_creators()
                     for c in creators:
                         c['platform'] = platform_name
+                        cid = str(c.get('creator_id', '')).strip()
+                        svc = (c.get('service') or '').lower().strip()
+                        orig_name = (c.get('original_name') or '').strip()
+
+                        # Resolve name if missing, 'Unknown', or just the numeric ID
+                        is_id_name = (not orig_name) or (orig_name.lower() == 'unknown') or (orig_name == cid) or orig_name.isdigit()
+                        if is_id_name and cid:
+                            resolved = lookup.get((cid, svc)) or lookup.get(cid)
+                            if resolved:
+                                c['original_name'] = resolved
+                                # Persist the corrected creator name to the SQLite database
+                                try:
+                                    with db_manager.db_lock:
+                                        db_manager.cursor.execute(
+                                            "UPDATE creator_mappings SET original_name = ? WHERE creator_id = ? AND (service = ? OR service IS NULL)",
+                                            (resolved, cid, c.get('service'))
+                                        )
+                                        db_manager.conn.commit()
+                                except Exception as e:
+                                    print(f"Error persisting resolved name for {cid}: {e}")
+
                         all_creators.append(c)
                 except Exception as e:
                     print(f"Error reading DB {file}: {e}")
@@ -798,17 +890,18 @@ class AutoSyncTabWidget(QWidget):
             chk.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.sync_table.setItem(row, 0, chk)
 
-            item1 = QTableWidgetItem(c.get('original_name', 'Unknown'))
+            cid = str(c.get('creator_id', '')).strip()
+            display_name = c.get('original_name') or (lookup.get(cid) if lookup else None) or f"Creator {cid}"
+            item1 = QTableWidgetItem(display_name)
+            item1.setData(Qt.ItemDataRole.UserRole, cid)
+            item1.setToolTip(f"{display_name} (ID: {cid})")
             item1.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
             self.sync_table.setItem(row, 1, item1)
 
-            item2 = QTableWidgetItem(c.get('platform', '').capitalize())
+            service_name = (c.get('service', '') or 'Unknown').capitalize()
+            item2 = QTableWidgetItem(service_name)
             item2.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
             self.sync_table.setItem(row, 2, item2)
-
-            item3 = QTableWidgetItem(c.get('service', '') or 'Unknown')
-            item3.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
-            self.sync_table.setItem(row, 3, item3)
 
             # Setup Output Directory column widget
             sync_settings = {}
@@ -869,7 +962,7 @@ class AutoSyncTabWidget(QWidget):
             out_layout.addWidget(line_edit, 1)
             out_layout.addWidget(btn)
 
-            self.sync_table.setCellWidget(row, 4, out_widget)
+            self.sync_table.setCellWidget(row, 3, out_widget)
 
             platform = c.get('platform')
             creator_id = c.get('creator_id')
@@ -888,23 +981,22 @@ class AutoSyncTabWidget(QWidget):
         self._filter_table_rows()
 
     def _filter_table_rows(self):
-        """Filters the rows of sync_table by search text and platform."""
+        """Filters the rows of sync_table by search text and service."""
         query = self.creator_search_input.text().strip().lower()
-        platform_filter = self.creator_platform_combo.currentText().lower()
+        service_filter = self.creator_platform_combo.currentText().lower()
 
         for row in range(self.sync_table.rowCount()):
             name_item = self.sync_table.item(row, 1)
-            platform_item = self.sync_table.item(row, 2)
-            service_item = self.sync_table.item(row, 3)
+            service_item = self.sync_table.item(row, 2)
 
             name = name_item.text().lower() if name_item else ""
-            platform = platform_item.text().lower() if platform_item else ""
+            cid = str(name_item.data(Qt.ItemDataRole.UserRole) or "").lower() if name_item else ""
             service = service_item.text().lower() if service_item else ""
 
-            match_text = (not query) or (query in name or query in platform or query in service)
-            match_plat = (platform_filter == "all platforms") or (platform_filter == platform or platform_filter == service)
+            match_text = (not query) or (query in name or query in cid or query in service)
+            match_service = (service_filter in ("all services", "all platforms")) or (service_filter == service)
 
-            self.sync_table.setRowHidden(row, not (match_text and match_plat))
+            self.sync_table.setRowHidden(row, not (match_text and match_service))
 
     def _on_sync_item_changed(self, item):
         if item.column() == 0:
@@ -943,7 +1035,7 @@ class AutoSyncTabWidget(QWidget):
         platform_name, creator_id = platform_id_data
         creator_name_item = self.sync_table.item(row, 1)
         creator_name = creator_name_item.text() if creator_name_item else f"ID: {creator_id}"
-        service_item = self.sync_table.item(row, 3)
+        service_item = self.sync_table.item(row, 2)
         service = service_item.text() if service_item else platform_name
 
         menu = QMenu(self)
@@ -973,7 +1065,7 @@ class AutoSyncTabWidget(QWidget):
         menu.exec(self.sync_table.viewport().mapToGlobal(pos))
 
     def _open_creator_folder(self, row: int):
-        cell_widget = self.sync_table.cellWidget(row, 4)
+        cell_widget = self.sync_table.cellWidget(row, 3)
         if cell_widget:
             le = cell_widget.findChild(QLineEdit)
             if le and le.text() and os.path.isdir(le.text()):
@@ -1053,6 +1145,22 @@ class AutoSyncTabWidget(QWidget):
     #  Settings Management
     # ─────────────────────────────────────────────────────────────────────────
 
+    def _update_daemon_badge_style(self, is_active: bool):
+        scale = getattr(self, 'scale', 1.0)
+        pad_h = int(10 * scale)
+        if is_active:
+            self.daemon_badge.setText("Daemon Active")
+            self.daemon_badge.setStyleSheet(
+                f"font-size: 8.5pt; font-weight: bold; color: #48BB78; background-color: #1A3626; "
+                f"border: 1px solid #276749; border-radius: 4px; padding: 0px {pad_h}px;"
+            )
+        else:
+            self.daemon_badge.setText("Daemon Inactive")
+            self.daemon_badge.setStyleSheet(
+                f"font-size: 8.5pt; font-weight: bold; color: #9A9EAA; background-color: #2D3035; "
+                f"border: 1px solid #424652; border-radius: 4px; padding: 0px {pad_h}px;"
+            )
+
     def _load_auto_sync_settings(self):
         if not hasattr(self.parent_app, 'settings'):
             return
@@ -1063,18 +1171,7 @@ class AutoSyncTabWidget(QWidget):
         self.minimize_to_tray_cb.setChecked(settings.value("minimize_to_tray", False, type=bool))
 
         # Update daemon status badge
-        if is_enabled:
-            self.daemon_badge.setText("Daemon Active")
-            self.daemon_badge.setStyleSheet(
-                "font-size: 8pt; font-weight: bold; color: #48BB78; background-color: #1A3626; "
-                "border: 1px solid #276749; border-radius: 4px; padding: 4px 8px;"
-            )
-        else:
-            self.daemon_badge.setText("Daemon Inactive")
-            self.daemon_badge.setStyleSheet(
-                "font-size: 8pt; font-weight: bold; color: #9A9EAA; background-color: #2D3035; "
-                "border: 1px solid #424652; border-radius: 4px; padding: 4px 8px;"
-            )
+        self._update_daemon_badge_style(is_enabled)
 
         self.idle_threshold_spin.setValue(settings.value("auto_sync_idle_threshold", 10, type=int))
         self.enable_early_stop_cb.setChecked(settings.value("auto_sync_enable_early_stop", True, type=bool))
@@ -1103,18 +1200,7 @@ class AutoSyncTabWidget(QWidget):
         settings.setValue("minimize_to_tray", self.minimize_to_tray_cb.isChecked())
 
         # Update daemon status badge
-        if is_enabled:
-            self.daemon_badge.setText("Daemon Active")
-            self.daemon_badge.setStyleSheet(
-                "font-size: 8pt; font-weight: bold; color: #48BB78; background-color: #1A3626; "
-                "border: 1px solid #276749; border-radius: 4px; padding: 4px 8px;"
-            )
-        else:
-            self.daemon_badge.setText("Daemon Inactive")
-            self.daemon_badge.setStyleSheet(
-                "font-size: 8pt; font-weight: bold; color: #9A9EAA; background-color: #2D3035; "
-                "border: 1px solid #424652; border-radius: 4px; padding: 4px 8px;"
-            )
+        self._update_daemon_badge_style(is_enabled)
 
         settings.setValue("auto_sync_idle_threshold", self.idle_threshold_spin.value())
         settings.setValue("auto_sync_enable_early_stop", self.enable_early_stop_cb.isChecked())

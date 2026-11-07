@@ -1360,7 +1360,7 @@ class PostProcessorWorker:
                     if getattr(self, 'platform_db', None):
                         creator_name = None
                         if isinstance(self.creator_name_cache, dict) and getattr(self, 'service', None) and getattr(self, 'user_id', None):
-                            creator_name = self.creator_name_cache.get((str(self.service).lower(), str(self.user_id)))
+                            creator_name = self.creator_name_cache.get((str(self.service).lower(), str(self.user_id))) or self.creator_name_cache.get(str(self.user_id))
                         if not creator_name:
                             creator_name = self.post.get('user') or os.path.basename(effective_save_folder)
                         # Use the URL hash (sha256 from CDN path) as the primary identifier.

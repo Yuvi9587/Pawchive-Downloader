@@ -381,7 +381,8 @@ class DownloaderApp (QWidget ):
         self._retranslate_main_ui()
         self._load_persistent_history()
         self._load_saved_download_location()
-        self._load_saved_cookie_settings() 
+        self._load_saved_cookie_settings()
+        self._load_creator_name_cache_from_json() 
         self._update_button_states_and_connections()
         self._check_for_interrupted_session()
         self._cleanup_after_update() 
@@ -2418,6 +2419,10 @@ class DownloaderApp (QWidget ):
         self .log_signal .emit ("ℹ️ Attempting to load creators.json for creator name cache.")
 
         creators_file_path = os.path.join(self.app_base_dir, "data", "creators.json")
+        if not os.path.exists(creators_file_path):
+            bundled_path = os.path.join(get_app_base_path(), "data", "creators.json")
+            if os.path.exists(bundled_path):
+                creators_file_path = bundled_path
 
         if not os .path .exists (creators_file_path ):
             self .log_signal .emit (f"⚠️ 'creators.json' not found at {creators_file_path }. Creator name cache will be empty.")
@@ -2436,12 +2441,15 @@ class DownloaderApp (QWidget ):
             else :
                 self .log_signal .emit (f"⚠️ 'creators.json' has an unexpected format. Creator name cache may be incomplete.")
 
-            for creator_data in creators_list :
-                creator_id =creator_data .get ("id")
-                name =creator_data .get ("name")
-                service =creator_data .get ("service")
-                if creator_id and name and service and service.lower() in ("patreon", "fanbox", "discord"):
-                    self .creator_name_cache [(service .lower (),str (creator_id ))]=name 
+            for creator_data in creators_list:
+                creator_id = str(creator_data.get("id", "")).strip()
+                name = (creator_data.get("name") or "").strip()
+                service = (creator_data.get("service") or "").lower().strip()
+                if creator_id and name:
+                    if service:
+                        self.creator_name_cache[(service, creator_id)] = name
+                    if creator_id not in self.creator_name_cache:
+                        self.creator_name_cache[creator_id] = name 
          
             print(f"DEBUG: Loaded {len(self.creator_name_cache)} creators from {creators_file_path}")
             self .log_signal .emit (f"✅ Successfully loaded {len (self .creator_name_cache )} creator names into cache from 'creators.json'.")
@@ -4793,7 +4801,8 @@ class DownloaderApp (QWidget ):
                 if platform_name and id1:
                     db_manager = PlatformDatabaseManager.get_instance(platform_name, os.path.join(self.app_base_dir, 'appdata'))
                     settings_json = json.dumps(ui_settings, default=str)
-                    db_manager.update_sync_settings(id1, service, settings_json)
+                    resolved_cname = self.creator_name_cache.get(((service or '').lower(), str(id1))) or self.creator_name_cache.get(str(id1))
+                    db_manager.update_sync_settings(id1, service, settings_json, creator_name=resolved_cname)
                     self.log_signal.emit(f"💾 Saved UI configuration profile for sync.")
             except Exception as e:
                 self.log_signal.emit(f"⚠️ Could not save sync settings: {e}")

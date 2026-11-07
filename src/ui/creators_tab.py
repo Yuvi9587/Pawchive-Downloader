@@ -371,6 +371,11 @@ class CreatorsTabWidget(QWidget):
         else:
             project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"))
         self.creators_file_path = os.path.join(project_root, "data", "creators.json")
+        if not os.path.exists(self.creators_file_path):
+            from ..utils.file_utils import get_app_base_path
+            bundled_creators = os.path.join(get_app_base_path(), "data", "creators.json")
+            if os.path.exists(bundled_creators):
+                self.creators_file_path = bundled_creators
 
         self.debounce_timer = QTimer(self)
         self.debounce_timer.setSingleShot(True)

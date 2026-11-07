@@ -27,11 +27,19 @@ from src.ui.main_window import DownloaderApp
 from src.core.visual_sorter import VisualSorter
 from src.config.constants import CONFIG_ORGANIZATION_NAME, CONFIG_APP_NAME_MAIN
 
-# --- Define APP_BASE_DIR globally and make available early ---
-if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
-    APP_BASE_DIR = sys._MEIPASS
+# --- Define Directories for Runtime Data and Bundled Resources ---
+if getattr(sys, 'frozen', False):
+    APP_RUNTIME_DIR = os.path.dirname(sys.executable)
+    if hasattr(sys, '_MEIPASS'):
+        APP_RESOURCE_DIR = sys._MEIPASS
+    else:
+        internal_dir = os.path.join(APP_RUNTIME_DIR, '_internal')
+        APP_RESOURCE_DIR = internal_dir if os.path.isdir(internal_dir) else APP_RUNTIME_DIR
 else:
-    APP_BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+    APP_RUNTIME_DIR = os.path.abspath(os.path.dirname(__file__))
+    APP_RESOURCE_DIR = APP_RUNTIME_DIR
+
+APP_BASE_DIR = APP_RUNTIME_DIR
 
 # Optional: Set a global variable or pass it into modules if needed
 # Or re-export it via constants.py for cleaner imports
@@ -106,7 +114,7 @@ def main():
         qt_app.setStyle("Fusion")
 
         # --- Application-level icon (taskbar + all windows) ---
-        _icon_path = os.path.join(APP_BASE_DIR, "assets", "Pawchive.ico")
+        _icon_path = os.path.join(APP_RESOURCE_DIR, "assets", "Pawchive.ico")
         if os.path.exists(_icon_path):
             _app_icon = QIcon(_icon_path)
             qt_app.setWindowIcon(_app_icon)
