@@ -17,22 +17,6 @@ if hasattr(sys.stdout, 'reconfigure'):
     except Exception:
         pass
 
-# --- PySide6 Imports ---
-from PySide6.QtWidgets import QApplication, QDialog
-from PySide6.QtCore import QCoreApplication
-from PySide6.QtGui import QIcon
-
-try:
-    import PySide6.QtSvg
-    import PySide6.QtSvgWidgets
-except ImportError:
-    pass
-
-# --- Local Application Imports ---
-from src.ui.main_window import DownloaderApp
-from src.core.visual_sorter import VisualSorter
-from src.config.constants import CONFIG_ORGANIZATION_NAME, CONFIG_APP_NAME_MAIN
-
 # --- Define Directories for Runtime Data and Bundled Resources ---
 if getattr(sys, 'frozen', False):
     APP_RUNTIME_DIR = os.path.dirname(sys.executable)
@@ -46,6 +30,88 @@ else:
     APP_RESOURCE_DIR = APP_RUNTIME_DIR
 
 APP_BASE_DIR = APP_RUNTIME_DIR
+
+# --- Windows DLL and Qt Plugin search paths bootstrap for PyInstaller standalone bundles ---
+if sys.platform.startswith('win'):
+    import ctypes
+    _pyside_candidates = [
+        os.path.join(APP_RESOURCE_DIR, 'PySide6'),
+        os.path.join(APP_RUNTIME_DIR, '_internal', 'PySide6'),
+        os.path.join(APP_RUNTIME_DIR, 'PySide6'),
+    ]
+    _shiboken_candidates = [
+        os.path.join(APP_RESOURCE_DIR, 'shiboken6'),
+        os.path.join(APP_RUNTIME_DIR, '_internal', 'shiboken6'),
+        os.path.join(APP_RUNTIME_DIR, 'shiboken6'),
+    ]
+    _dll_dirs = [d for d in (_pyside_candidates + _shiboken_candidates + [APP_RESOURCE_DIR, APP_RUNTIME_DIR]) if os.path.isdir(d)]
+
+    # 1. Prepend to PATH so standard LoadLibrary searches them
+    os.environ['PATH'] = os.pathsep.join(_dll_dirs) + os.pathsep + os.environ.get('PATH', '')
+
+    # 2. Add DLL directories for Python 3.8+ Windows loader
+    if hasattr(os, 'add_dll_directory'):
+        for d in _dll_dirs:
+            try:
+                os.add_dll_directory(d)
+            except Exception:
+                pass
+
+    # 3. Set Windows kernel DLL directory
+    for ps_dir in _pyside_candidates:
+        if os.path.isdir(ps_dir):
+            try:
+                ctypes.windll.kernel32.SetDllDirectoryW(ps_dir)
+                break
+            except Exception:
+                pass
+
+    # 4. Explicitly pre-load Qt runtime libraries using ALTERED_SEARCH_PATH
+    LOAD_WITH_ALTERED_SEARCH_PATH = 0x00000008
+    for ps_dir in _pyside_candidates:
+        if os.path.isdir(ps_dir):
+            for dll_name in ('Qt6Core.dll', 'Qt6Gui.dll', 'Qt6Widgets.dll', 'Qt6Svg.dll', 'Qt6SvgWidgets.dll'):
+                dll_full = os.path.join(ps_dir, dll_name)
+                if os.path.exists(dll_full):
+                    try:
+                        ctypes.windll.kernel32.LoadLibraryExW(dll_full, 0, LOAD_WITH_ALTERED_SEARCH_PATH)
+                    except Exception:
+                        pass
+            # Preload SVG plugins
+            for sub, plg in [('imageformats', 'qsvg.dll'), ('iconengines', 'qsvgicon.dll')]:
+                plg_path = os.path.join(ps_dir, 'plugins', sub, plg)
+                if os.path.exists(plg_path):
+                    try:
+                        ctypes.windll.kernel32.LoadLibraryExW(plg_path, 0, LOAD_WITH_ALTERED_SEARCH_PATH)
+                    except Exception:
+                        pass
+            break
+
+# --- PySide6 Imports ---
+from PySide6.QtWidgets import QApplication, QDialog
+from PySide6.QtCore import QCoreApplication
+from PySide6.QtGui import QIcon, QImageReader
+
+try:
+    import PySide6.QtSvg
+    import PySide6.QtSvgWidgets
+except ImportError:
+    pass
+
+try:
+    import fpdf
+except ImportError:
+    pass
+
+try:
+    import docx
+except ImportError:
+    pass
+
+# --- Local Application Imports ---
+from src.ui.main_window import DownloaderApp
+from src.core.visual_sorter import VisualSorter
+from src.config.constants import CONFIG_ORGANIZATION_NAME, CONFIG_APP_NAME_MAIN
 
 # Optional: Set a global variable or pass it into modules if needed
 # Or re-export it via constants.py for cleaner imports
@@ -130,6 +196,16 @@ def main():
 
         qt_app = QApplication(sys.argv)
         qt_app.setStyle("Fusion")
+
+        # Verify and ensure SVG format support
+        supported_formats = [bytes(fmt).decode('utf-8', errors='ignore').lower() for fmt in QImageReader.supportedImageFormats()]
+        if 'svg' not in supported_formats:
+            # Fallback attempt: re-register all possible plugin paths
+            for p_dir in plugin_dirs:
+                if os.path.isdir(p_dir):
+                    QCoreApplication.addLibraryPath(p_dir)
+            supported_formats = [bytes(fmt).decode('utf-8', errors='ignore').lower() for fmt in QImageReader.supportedImageFormats()]
+        print(f"Qt initialized. Supported image formats ({len(supported_formats)}): {', '.join(supported_formats)}")
 
         # --- Application-level icon (taskbar + all windows) ---
         _icon_path = os.path.join(APP_RESOURCE_DIR, "assets", "Pawchive.ico")

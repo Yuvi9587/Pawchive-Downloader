@@ -2,6 +2,7 @@ import os
 import re
 import sys 
 
+_fpdf_error = ""
 try:
     try:
         from fpdf import FPDF
@@ -25,6 +26,7 @@ try:
 
 except Exception as e:
     FPDF_AVAILABLE = False
+    _fpdf_error = f"{type(e).__name__}: {e}"
     FPDF = None 
     PDF = None
 
@@ -353,7 +355,8 @@ def create_individual_pdf(post_data, output_filename, font_path, add_info_page=F
     Supports optional metadata page and appending comments.
     """
     if not FPDF_AVAILABLE:
-        logger("❌ PDF Creation failed: 'fpdf2' library not installed.")
+        err_detail = f" ({_fpdf_error})" if _fpdf_error else ""
+        logger(f"❌ PDF Creation failed: 'fpdf2' library not available{err_detail}.")
         return False
 
     pdf = PDF()
@@ -422,7 +425,8 @@ def create_single_pdf_from_content(posts_data, output_filename, font_path, add_i
     Creates a single, continuous PDF from multiple posts.
     """
     if not FPDF_AVAILABLE:
-        logger("❌ PDF Creation failed: 'fpdf2' library is not installed.")
+        err_detail = f" ({_fpdf_error})" if _fpdf_error else ""
+        logger(f"❌ PDF Creation failed: 'fpdf2' library not available{err_detail}.")
         return False
 
     if not posts_data:
