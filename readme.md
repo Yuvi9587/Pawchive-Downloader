@@ -119,8 +119,8 @@ python main.py
 ## Configuration & Usage Tips
 
 ### Threading Optimization
-- The default recommended thread pool size is **2 to 4 threads**.
-- Excessively high thread counts (20+) can saturate consumer bandwidth or trigger temporary HTTP 429 rate limits from server endpoints. The application features built-in backoff, but conservative thread settings often yield faster and smoother overall completion.
+- The default thread pool size is set to **2 threads**, which is the safest setting to avoid triggering rate limits on Pawchive endpoints.
+- You can adjust the thread count if needed, but excessively high thread counts can saturate bandwidth or trigger temporary HTTP 429 rate limits. The application features built-in exponential backoff, but conservative thread settings yield faster and smoother overall completion.
 
 ### Using Account Cookies for Favorites
 To sync your bookmarked creators and posts in the **Favorites** tab:

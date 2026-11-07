@@ -120,7 +120,7 @@ class PostProcessorWorker:
                  skip_words_scope=SKIP_SCOPE_FILES,
                  show_external_links=False,
                  extract_links_only=False,
-                 num_file_threads=4, skip_current_file_flag=None,
+                 num_file_threads=2, skip_current_file_flag=None,
                  manga_mode_active=False,
                  manga_filename_style=STYLE_POST_TITLE,
                  char_filter_scope=CHAR_SCOPE_FILES,

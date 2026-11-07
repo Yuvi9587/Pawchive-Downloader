@@ -388,13 +388,13 @@ class PostsTableModel(QAbstractTableModel):
 
         if role == Qt.ItemDataRole.ForegroundRole:
             if col == 1:
-                return QColor("#A8C7FA")  # Creator name in soft bright blue
+                return QColor("#F5B0A8")  # Creator name in soft warm coral
             elif col == 2:
                 return QColor("#DFE1E5")  # Post title
             elif col == 3:
                 return QColor("#8C929E")  # Published date
             elif col == 4:
-                return QColor("#7EB6E0")  # Media count
+                return QColor("#E5A198")  # Media count
             elif col == 5:
                 return QColor("#6B7280")  # Post ID
 
@@ -478,7 +478,7 @@ class CreatorPickerDialog(QDialog):
         title_box = QVBoxLayout()
         title_box.setSpacing(int(2 * scale))
         title = QLabel("Select Creator(s) to Browse Posts")
-        title.setStyleSheet(f"font-size: {int(11 * scale)}pt; font-weight: bold; color: #9BBCE8;")
+        title.setStyleSheet(f"font-size: {int(11 * scale)}pt; font-weight: bold; color: #EBB3AC;")
         sub = QLabel("Tip: Search and click any creator to add them. You can search multiple creators one by one — selections stay accumulated!")
         sub.setStyleSheet("font-size: 8pt; color: #8A8D93;")
         title_box.addWidget(title)
@@ -512,8 +512,8 @@ class CreatorPickerDialog(QDialog):
         # Persistent Selected Creators Tray
         self.selected_tray_label = QLabel("No creators selected yet. Click or select creators below to add them.")
         self.selected_tray_label.setStyleSheet(
-            "color: #7EB6E0; font-size: 8.5pt; font-weight: normal; background-color: #23262C; "
-            "border: 1px solid #383C45; border-radius: 4px; padding: 5px 8px;"
+            "color: #E5A198; font-size: 8.5pt; font-weight: normal; background-color: #2D2528; "
+            "border: 1px solid #483A3E; border-radius: 4px; padding: 5px 8px;"
         )
         self.selected_tray_label.setWordWrap(True)
         layout.addWidget(self.selected_tray_label)
@@ -715,7 +715,7 @@ class PostsTabWidget(QWidget):
         title_icon.setPixmap(QIcon(get_asset_path("assets/Svg/doc.svg")).pixmap(int(20 * scale), int(20 * scale)))
         title_lbl = QLabel("Creator Posts")
         title_lbl.setStyleSheet(
-            f"font-size: {int(13 * scale)}pt; font-weight: bold; color: #9BBCE8;"
+            f"font-size: {int(13 * scale)}pt; font-weight: bold; color: #EBB3AC;"
         )
         title_h.addWidget(title_icon)
         title_h.addWidget(title_lbl)
@@ -728,7 +728,7 @@ class PostsTabWidget(QWidget):
         header_bar.addLayout(title_col, 1)
 
         self.status_label = QLabel("No creator selected")
-        self.status_label.setStyleSheet("font-size: 8.5pt; color: #7EB6E0; font-weight: bold;")
+        self.status_label.setStyleSheet("font-size: 8.5pt; color: #E5A198; font-weight: bold;")
         header_bar.addWidget(self.status_label)
 
         root_layout.addLayout(header_bar)
@@ -853,7 +853,7 @@ class PostsTabWidget(QWidget):
         tool_layout.addWidget(self.prev_page_btn)
 
         self.page_info_lbl = QLabel("Offset: 0")
-        self.page_info_lbl.setStyleSheet("color: #7EB6E0; font-weight: bold; font-size: 8pt;")
+        self.page_info_lbl.setStyleSheet("color: #E5A198; font-weight: bold; font-size: 8pt;")
         tool_layout.addWidget(self.page_info_lbl)
 
         self.next_page_btn = QPushButton("Next 50")

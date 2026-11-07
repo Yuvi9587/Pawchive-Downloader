@@ -170,7 +170,7 @@ class QueueTabWidget(QWidget):
         self.tab_view.setStyleSheet(
             "QTabWidget::pane { border: 1px solid #383D48; border-radius: 6px; background-color: #24262B; }"
             "QTabBar::tab { background: #2A2D34; color: #BAC0CB; padding: 6px 14px; font-weight: bold; border-top-left-radius: 5px; border-top-right-radius: 5px; margin-right: 2px; }"
-            "QTabBar::tab:selected { background: #383D48; color: #60A5FA; border-bottom: 2px solid #3B82F6; }"
+            "QTabBar::tab:selected { background: #383D48; color: #F5B0A8; border-bottom: 2px solid #D48378; }"
             "QTabBar::tab:hover { background: #32353E; color: #FFFFFF; }"
         )
 
@@ -289,7 +289,7 @@ class QueueTabWidget(QWidget):
                 "   color: #BAC0CB; font-size: 8.5pt; font-weight: 600; padding: 2px 10px;"
                 "}"
                 "QPushButton:checked {"
-                "   background-color: #2563EB; border-color: #3B82F6; color: #FFFFFF;"
+                "   background-color: #B55D52; border-color: #C96E63; color: #FFFFFF;"
                 "}"
                 "QPushButton:hover:!checked {"
                 "   background-color: #353842; border-color: #4C5362;"
@@ -310,7 +310,7 @@ class QueueTabWidget(QWidget):
             "   background-color: #202328; border: 1px solid #383D48; border-radius: 4px;"
             "   color: #DDE2EB; padding: 2px 8px; font-size: 8.5pt;"
             "}"
-            "QLineEdit:focus { border: 1px solid #3B82F6; background-color: #1A1C20; }"
+            "QLineEdit:focus { border: 1px solid #D48378; background-color: #1D1A1C; }"
         )
         self.search_input.textChanged.connect(self._on_search_changed)
         toolbar_h.addWidget(self.search_input, 1)
@@ -385,9 +385,9 @@ class QueueTabWidget(QWidget):
             "   background-color: #2A2D34; border: 1px solid #383D48; border-radius: 4px;"
             "   color: #BAC0CB; font-size: 8.5pt; padding: 2px 10px;"
             "}"
-            "QPushButton:hover { background-color: #353842; border-color: #60A5FA; }"
+            "QPushButton:hover { background-color: #353842; border-color: #D48378; }"
             "QPushButton:checked {"
-            "   background-color: #1E3A8A; border: 1px solid #3B82F6; color: #93C5FD; font-weight: bold;"
+            "   background-color: #4A2826; border: 1px solid #783E3A; color: #F5B0A8; font-weight: bold;"
             "}"
         )
         self.auto_scroll_btn.setToolTip("Automatically scroll to active downloads in the All tab as progress advances.")
@@ -473,10 +473,10 @@ class QueueTabWidget(QWidget):
         self.exec_jobs_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.exec_jobs_btn.setStyleSheet(
             "QPushButton {"
-            "   background-color: #1565A8; border: 1px solid #1E88E5; border-radius: 4px;"
+            "   background-color: #B55D52; border: 1px solid #C96E63; border-radius: 4px;"
             "   color: #FFFFFF; font-weight: bold; font-size: 8.5pt; padding: 2px 14px;"
             "}"
-            "QPushButton:hover { background-color: #1976D2; }"
+            "QPushButton:hover { background-color: #C76E62; }"
         )
         self.exec_jobs_btn.clicked.connect(self._execute_all_jobs)
         btn_row.addWidget(self.exec_jobs_btn)
@@ -489,7 +489,7 @@ class QueueTabWidget(QWidget):
 
         btn_row.addStretch(1)
         self.jobs_count_lbl = QLabel("0 queued batch jobs found.")
-        self.jobs_count_lbl.setStyleSheet("color: #7EB6E0; font-size: 8.5pt;")
+        self.jobs_count_lbl.setStyleSheet("color: #E5A198; font-size: 8.5pt;")
         btn_row.addWidget(self.jobs_count_lbl)
 
         parent_layout.addWidget(self.jobs_table, 1)
@@ -969,7 +969,7 @@ class QueueTabWidget(QWidget):
                 "   text-align: center; color: #FFFFFF; font-size: 8pt; font-weight: bold;"
                 "}"
                 "QProgressBar::chunk {"
-                "   background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #2563EB, stop:1 #3B82F6);"
+                "   background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #B55D52, stop:1 #D48378);"
                 "   border-radius: 3px;"
                 "}"
             )
@@ -1026,7 +1026,7 @@ class QueueTabWidget(QWidget):
             if status == 'downloading':
                 status_lbl.setText("Downloading")
                 status_lbl.setStyleSheet(
-                    "background-color: #1E3A8A; color: #93C5FD; border: 1px solid #2563EB; "
+                    "background-color: #4A2826; color: #F5B0A8; border: 1px solid #783E3A; "
                     "border-radius: 4px; font-size: 7.5pt; font-weight: bold; padding: 2px 4px;"
                 )
             elif status == 'completed':
@@ -1131,7 +1131,7 @@ class QueueTabWidget(QWidget):
                     "   text-align: center; color: #FFFFFF; font-size: 8pt; font-weight: bold;"
                     "}"
                     "QProgressBar::chunk {"
-                    "   background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #2563EB, stop:1 #3B82F6);"
+                    "   background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #B55D52, stop:1 #D48378);"
                     "   border-radius: 3px;"
                     "}"
                 )
@@ -1144,7 +1144,7 @@ class QueueTabWidget(QWidget):
                     "   text-align: center; color: #FFFFFF; font-size: 8pt; font-weight: bold;"
                     "}"
                     "QProgressBar::chunk {"
-                    "   background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #2563EB, stop:1 #3B82F6);"
+                    "   background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #B55D52, stop:1 #D48378);"
                     "   border-radius: 3px;"
                     "}"
                 )
@@ -1315,12 +1315,12 @@ class QueueTabWidget(QWidget):
         self.sub_speed.setText(f"Average: {format_speed(avg_speed)} • Peak: {format_speed(self.peak_speed_bps)}")
 
         # 2. Worker Threads
-        configured_threads = 4
+        configured_threads = 2
         if hasattr(self.parent_app, 'thread_count_input') and self.parent_app.thread_count_input:
             try:
-                configured_threads = int(self.parent_app.thread_count_input.text() or 4)
+                configured_threads = int(self.parent_app.thread_count_input.text() or 2)
             except (ValueError, AttributeError, TypeError):
-                configured_threads = 4
+                configured_threads = 2
 
         is_multithread = True
         if hasattr(self.parent_app, 'use_multithreading_checkbox') and self.parent_app.use_multithreading_checkbox:
@@ -1633,7 +1633,7 @@ class QueueTabWidget(QWidget):
         menu.setStyleSheet(
             "QMenu { background-color: #24262B; color: #DFE1E5; border: 1px solid #3C3F46; border-radius: 4px; padding: 4px; }"
             "QMenu::item { padding: 5px 20px 5px 20px; border-radius: 3px; }"
-            "QMenu::item:selected { background-color: #1565A8; color: #FFFFFF; }"
+            "QMenu::item:selected { background-color: #B55D52; color: #FFFFFF; }"
         )
 
         act_folder = menu.addAction("Open Containing Folder")

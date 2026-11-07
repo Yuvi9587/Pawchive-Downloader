@@ -857,7 +857,7 @@ class DownloaderApp (QWidget ):
             settings['manga_date_prefix'] = self.manga_date_prefix_input.text().strip()
         
         try: settings['num_threads'] = int(self.thread_count_input.text().strip())
-        except (ValueError, AttributeError): settings['num_threads'] = 4
+        except (ValueError, AttributeError): settings['num_threads'] = 2
         try: settings['start_page'] = int(self.start_page_input.text().strip()) if self.start_page_input.text().strip() else None
         except (ValueError, AttributeError): settings['start_page'] = None
         try: settings['end_page'] = int(self.end_page_input.text().strip()) if self.end_page_input.text().strip() else None
@@ -6055,7 +6055,7 @@ class DownloaderApp (QWidget ):
             self.cookie_text_input.setText(settings.get('cookie_text', ''))
             if hasattr(self, 'manga_date_prefix_input'):
                 self.manga_date_prefix_input.setText(settings.get('manga_date_prefix', ''))
-            self.thread_count_input.setText(str(settings.get('num_threads', 4)))
+            self.thread_count_input.setText(str(settings.get('num_threads', 2)))
             self.start_page_input.setText(str(settings.get('start_page', '')) if settings.get('start_page') is not None else '')
             self.end_page_input.setText(str(settings.get('end_page', '')) if settings.get('end_page') is not None else '')
             
@@ -6651,7 +6651,7 @@ class DownloaderApp (QWidget ):
         self .custom_folder_input .clear ();self .character_input .clear ();
         self .skip_words_input .clear ();self .start_page_input .clear ();self .end_page_input .clear ();self .new_char_input .clear ();
         if hasattr (self ,'remove_from_filename_input'):self .remove_from_filename_input .clear ()
-        self .character_search_input .clear ();self .thread_count_input .setText ("4");self .radio_all .setChecked (True );
+        self .character_search_input .clear ();self .thread_count_input .setText ("2");self .radio_all .setChecked (True );
         self .skip_zip_checkbox .setChecked (True );self .download_thumbnails_checkbox .setChecked (False );
         self .compress_images_checkbox .setChecked (False );self .use_subfolders_checkbox .setChecked (False );
         self.use_subfolder_per_post_checkbox .setChecked (True );self .use_multithreading_checkbox .setChecked (True );

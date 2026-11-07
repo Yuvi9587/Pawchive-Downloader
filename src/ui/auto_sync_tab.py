@@ -292,7 +292,7 @@ class AutoSyncTabWidget(QWidget):
         )
         title_lbl = QLabel("Auto-Sync Hub")
         title_lbl.setStyleSheet(
-            f"font-size: {int(13 * scale)}pt; font-weight: bold; color: #9BBCE8;"
+            f"font-size: {int(13 * scale)}pt; font-weight: bold; color: #EBB3AC;"
         )
         title_h.addWidget(title_icon)
         title_h.addWidget(title_lbl)
@@ -351,9 +351,9 @@ class AutoSyncTabWidget(QWidget):
             }}
             QTabBar::tab:selected {{
                 background-color: #26282C;
-                color: #60A5FA;
+                color: #F5B0A8;
                 font-weight: bold;
-                border-bottom: 2px solid #2196F3;
+                border-bottom: 2px solid #D48378;
             }}
             QTabBar::tab:hover:!selected {{
                 background-color: #35383E;
@@ -476,7 +476,7 @@ class AutoSyncTabWidget(QWidget):
         settings_layout.addStretch(1)
 
         self.table_count_lbl = QLabel("0 creators monitored")
-        self.table_count_lbl.setStyleSheet("color: #7EB6E0; font-size: 8.5pt;")
+        self.table_count_lbl.setStyleSheet("color: #E5A198; font-size: 8.5pt;")
         settings_layout.addWidget(self.table_count_lbl)
 
         layout.addWidget(settings_group)

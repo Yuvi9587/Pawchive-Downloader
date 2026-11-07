@@ -34,7 +34,7 @@ class AboutTopicWidget(QWidget):
 
         title_lbl = QLabel(title_text)
         title_font_size = int(14 * scale)
-        title_lbl.setStyleSheet(f"font-size: {title_font_size}pt; font-weight: 700; color: #60A5FA;")
+        title_lbl.setStyleSheet(f"font-size: {title_font_size}pt; font-weight: 700; color: #E5A198;")
         title_row.addWidget(title_lbl)
         title_row.addStretch(1)
 
@@ -44,7 +44,7 @@ class AboutTopicWidget(QWidget):
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
         sep.setFrameShadow(QFrame.Shadow.Plain)
-        sep.setStyleSheet("background-color: #383D48; max-height: 1px;")
+        sep.setStyleSheet("background-color: #3D353A; max-height: 1px;")
         layout.addWidget(sep)
 
         # Scrollable content area
@@ -74,7 +74,7 @@ class AboutTopicWidget(QWidget):
                 line-height: 1.65;
             }}
             h3 {{
-                color: #93C5FD;
+                color: #EBB3AC;
                 font-size: {int(11.5 * scale)}pt;
                 margin-top: 14px;
                 margin-bottom: 6px;
@@ -94,27 +94,27 @@ class AboutTopicWidget(QWidget):
                 margin-bottom: 6px;
             }}
             code {{
-                background-color: #1E222A;
-                color: #F3F4F6;
+                background-color: #332B2E;
+                color: #FCEFEF;
                 padding: 2px 6px;
                 border-radius: 4px;
                 font-family: Consolas, 'Courier New', monospace;
-                border: 1px solid #333842;
+                border: 1px solid #483B40;
             }}
             a {{
-                color: #60A5FA;
+                color: #E5A198;
                 text-decoration: none;
             }}
             a:hover {{
                 text-decoration: underline;
             }}
             .tip-box {{
-                background-color: #1A2234;
-                border-left: 4px solid #3B82F6;
+                background-color: #382528;
+                border-left: 4px solid #CC7A70;
                 border-radius: 4px;
                 padding: 10px 14px;
                 margin: 10px 0px;
-                color: #E2E8F0;
+                color: #F8DFDC;
             }}
             .warn-box {{
                 background-color: #2D2314;
@@ -159,8 +159,8 @@ class AboutTabWidget(QWidget):
         header_frame.setObjectName("AboutHeaderFrame")
         header_frame.setStyleSheet("""
             QFrame#AboutHeaderFrame {
-                background-color: #212429;
-                border: 1px solid #32363F;
+                background-color: #242125;
+                border: 1px solid #3B3338;
                 border-radius: 8px;
             }
         """)
@@ -195,9 +195,9 @@ class AboutTabWidget(QWidget):
         version_badge = QLabel(f"v{APP_VERSION}")
         version_badge.setStyleSheet(f"""
             QLabel {{
-                background-color: #1E3A5F;
-                color: #60A5FA;
-                border: 1px solid #2B5288;
+                background-color: #4A2826;
+                color: #F5B0A8;
+                border: 1px solid #783E3A;
                 border-radius: 4px;
                 padding: 1px {int(6 * scale)}px;
                 font-size: {int(8.5 * scale)}pt;
@@ -226,8 +226,8 @@ class AboutTabWidget(QWidget):
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setStyleSheet(f"""
                 QPushButton {{
-                    background-color: #2D313A;
-                    border: 1px solid #3E434F;
+                    background-color: #2F2A2E;
+                    border: 1px solid #453C42;
                     border-radius: 5px;
                     color: #D1D5DB;
                     font-size: {int(8.5 * scale)}pt;
@@ -235,8 +235,8 @@ class AboutTabWidget(QWidget):
                     padding: 0 {int(10 * scale)}px;
                 }}
                 QPushButton:hover {{
-                    background-color: #383D48;
-                    border-color: #60A5FA;
+                    background-color: #3B3439;
+                    border-color: #D48378;
                     color: #FFFFFF;
                 }}
             """)
@@ -255,8 +255,8 @@ class AboutTabWidget(QWidget):
         body_frame.setObjectName("AboutBodyFrame")
         body_frame.setStyleSheet("""
             QFrame#AboutBodyFrame {
-                background-color: #212429;
-                border: 1px solid #32363F;
+                background-color: #242125;
+                border: 1px solid #3B3338;
                 border-radius: 8px;
             }
         """)
@@ -271,12 +271,12 @@ class AboutTabWidget(QWidget):
         self.topics_list.setFrameShape(QFrame.Shape.NoFrame)
         self.topics_list.setStyleSheet(f"""
             QListWidget {{
-                background-color: #1A1C20;
+                background-color: #1D1A1C;
                 border-top-left-radius: 8px;
                 border-bottom-left-radius: 8px;
-                border-right: 1px solid #2F333C;
+                border-right: 1px solid #332B30;
                 font-size: {int(9 * scale)}pt;
-                color: #C3C7D0;
+                color: #C5BCC1;
                 outline: none;
                 padding: 6px;
             }}
@@ -286,20 +286,20 @@ class AboutTabWidget(QWidget):
                 margin-bottom: 2px;
             }}
             QListWidget::item:hover {{
-                background-color: #262930;
+                background-color: #2C2427;
                 color: #FFFFFF;
             }}
             QListWidget::item:selected {{
-                background-color: #1E3A5F;
-                color: #60A5FA;
+                background-color: #4A2826;
+                color: #F5B0A8;
                 font-weight: 600;
-                border: 1px solid #2B5288;
+                border: 1px solid #783E3A;
             }}
         """)
 
         # Stacked Widget on Right
         self.content_stack = QStackedWidget()
-        self.content_stack.setStyleSheet("background-color: #212429; border-top-right-radius: 8px; border-bottom-right-radius: 8px;")
+        self.content_stack.setStyleSheet("background-color: #242125; border-top-right-radius: 8px; border-bottom-right-radius: 8px;")
 
         # Populate Topics with SVG icons
         topics = self._get_pawchive_topics()

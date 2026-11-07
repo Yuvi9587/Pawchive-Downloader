@@ -92,8 +92,8 @@ class SupportCard(QFrame):
         action_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         action_btn.setStyleSheet(f"""
             QPushButton {{
-                background-color: #2D313A;
-                border: 1px solid #3E434F;
+                background-color: #2F2A2E;
+                border: 1px solid #453C42;
                 border-radius: 4px;
                 color: #D1D5DB;
                 font-size: {int(8.5 * scale)}pt;
@@ -101,7 +101,7 @@ class SupportCard(QFrame):
                 padding: 0 {int(10 * scale)}px;
             }}
             QPushButton:hover {{
-                background-color: #383D48;
+                background-color: #3B3439;
                 border-color: {hover_border_color};
                 color: #FFFFFF;
             }}
@@ -159,8 +159,8 @@ class SupportTabWidget(QWidget):
         header_frame.setObjectName("SupportHeaderFrame")
         header_frame.setStyleSheet("""
             QFrame#SupportHeaderFrame {
-                background-color: #212429;
-                border: 1px solid #32363F;
+                background-color: #242125;
+                border: 1px solid #3B3338;
                 border-radius: 8px;
             }
         """)
@@ -296,8 +296,8 @@ class SupportTabWidget(QWidget):
         thank_you_box = QFrame()
         thank_you_box.setStyleSheet("""
             QFrame {
-                background-color: #1A2234;
-                border-left: 4px solid #3B82F6;
+                background-color: #382528;
+                border-left: 4px solid #CC7A70;
                 border-radius: 6px;
                 padding: 12px 16px;
             }
@@ -307,7 +307,7 @@ class SupportTabWidget(QWidget):
         ty_layout.setSpacing(int(4 * scale))
 
         ty_title = QLabel("Thank you for using Pawchive Downloader!")
-        ty_title.setStyleSheet(f"font-size: {int(10.5 * scale)}pt; font-weight: 700; color: #93C5FD; background: transparent; border: none;")
+        ty_title.setStyleSheet(f"font-size: {int(10.5 * scale)}pt; font-weight: 700; color: #F5B0A8; background: transparent; border: none;")
         ty_layout.addWidget(ty_title)
 
         ty_text = QLabel(
@@ -315,7 +315,7 @@ class SupportTabWidget(QWidget):
             "the project with other archivists, your support makes a huge difference. Happy downloading!"
         )
         ty_text.setWordWrap(True)
-        ty_text.setStyleSheet(f"font-size: {int(9 * scale)}pt; color: #E2E8F0; line-height: 1.5; background: transparent; border: none;")
+        ty_text.setStyleSheet(f"font-size: {int(9 * scale)}pt; color: #F0DCDA; line-height: 1.5; background: transparent; border: none;")
         ty_layout.addWidget(ty_text)
 
         content_layout.addWidget(thank_you_box)
@@ -339,7 +339,7 @@ class SupportTabWidget(QWidget):
         layout.addWidget(icon_lbl)
 
         lbl = QLabel(text)
-        lbl.setStyleSheet(f"font-size: {int(11.5 * scale)}pt; font-weight: 700; color: #60A5FA;")
+        lbl.setStyleSheet(f"font-size: {int(11.5 * scale)}pt; font-weight: 700; color: #E5A198;")
         layout.addWidget(lbl)
         layout.addStretch(1)
         return widget

@@ -442,7 +442,7 @@ class FavoritesTabWidget(QWidget):
         tb.addWidget(self.desel_all_artists_btn)
 
         self.artists_count_lbl = QLabel("0 artists found")
-        self.artists_count_lbl.setStyleSheet("color: #7EB6E0; font-size: 8.5pt; font-weight: 500;")
+        self.artists_count_lbl.setStyleSheet("color: #E5A198; font-size: 8.5pt; font-weight: 500;")
         tb.addWidget(self.artists_count_lbl)
 
         tb.addStretch(1)
@@ -452,10 +452,10 @@ class FavoritesTabWidget(QWidget):
         self.download_artists_btn.setEnabled(False)
         self.download_artists_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.download_artists_btn.setStyleSheet(
-            "QPushButton { background: #2563EB; border: 1px solid #3B82F6; border-radius: 4px; "
+            "QPushButton { background: #B55D52; border: 1px solid #C96E63; border-radius: 4px; "
             "color: #FFFFFF; font-size: 8.5pt; font-weight: bold; padding: 0 16px; }"
-            "QPushButton:hover { background: #1D4ED8; }"
-            "QPushButton:disabled { background: #1F2937; border-color: #374151; color: #6B7280; }"
+            "QPushButton:hover { background: #C76E62; }"
+            "QPushButton:disabled { background: #342628; border-color: #4A3538; color: #7A6064; }"
         )
         self.download_artists_btn.clicked.connect(self._download_selected_artists)
         tb.addWidget(self.download_artists_btn)
@@ -574,7 +574,7 @@ class FavoritesTabWidget(QWidget):
         tb.addWidget(self.desel_all_posts_btn)
 
         self.posts_count_lbl = QLabel("0 posts found")
-        self.posts_count_lbl.setStyleSheet("color: #7EB6E0; font-size: 8.5pt; font-weight: 500;")
+        self.posts_count_lbl.setStyleSheet("color: #E5A198; font-size: 8.5pt; font-weight: 500;")
         tb.addWidget(self.posts_count_lbl)
 
         tb.addStretch(1)
@@ -584,10 +584,10 @@ class FavoritesTabWidget(QWidget):
         self.download_posts_btn.setEnabled(False)
         self.download_posts_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.download_posts_btn.setStyleSheet(
-            "QPushButton { background: #2563EB; border: 1px solid #3B82F6; border-radius: 4px; "
+            "QPushButton { background: #B55D52; border: 1px solid #C96E63; border-radius: 4px; "
             "color: #FFFFFF; font-size: 8.5pt; font-weight: bold; padding: 0 16px; }"
-            "QPushButton:hover { background: #1D4ED8; }"
-            "QPushButton:disabled { background: #1F2937; border-color: #374151; color: #6B7280; }"
+            "QPushButton:hover { background: #C76E62; }"
+            "QPushButton:disabled { background: #342628; border-color: #4A3538; color: #7A6064; }"
         )
         self.download_posts_btn.clicked.connect(self._download_selected_posts)
         tb.addWidget(self.download_posts_btn)

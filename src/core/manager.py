@@ -156,7 +156,7 @@ class DownloadManager:
         It provides immediate feedback as soon as the first batch of posts is found.
         """
         try:
-            num_workers = min(config.get('num_threads', 4), MAX_THREADS)
+            num_workers = min(config.get('num_threads', 2), MAX_THREADS)
             self.thread_pool = ThreadPoolExecutor(max_workers=num_workers, thread_name_prefix='PostWorker_')
 
             session_processed_ids = set(restore_data.get('processed_post_ids', [])) if restore_data else set()

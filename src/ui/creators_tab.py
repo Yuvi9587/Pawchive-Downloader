@@ -235,7 +235,7 @@ class CreatorCardDelegate(QStyledItemDelegate):
 
         action_text = "Double-click"
         act_rect = QRectF(r.right() - int(110 * scale), r.bottom() - int(24 * scale), int(100 * scale), int(18 * scale))
-        painter.setPen(QColor('#7EB6E0') if is_sel else QColor('#586C85'))
+        painter.setPen(QColor('#E5A198') if is_sel else QColor('#7A6568'))
         painter.drawText(act_rect, Qt.AlignVCenter | Qt.AlignRight, action_text)
 
         painter.restore()
@@ -401,21 +401,21 @@ class CreatorsTabWidget(QWidget):
         title_icon.setPixmap(QIcon(get_asset_path("assets/Svg/user.svg")).pixmap(int(20 * scale), int(20 * scale)))
         title_lbl = QLabel("Creators Directory")
         title_lbl.setStyleSheet(
-            f"font-size: {int(13 * scale)}pt; font-weight: bold; color: #9BBCE8;"
+            f"font-size: {int(13 * scale)}pt; font-weight: bold; color: #EBB3AC;"
         )
         title_h.addWidget(title_icon)
         title_h.addWidget(title_lbl)
         title_h.addStretch(1)
         title_col.addLayout(title_h)
 
-        subtitle_lbl = QLabel("Explore Pawchive creators (Patreon, Fanbox, Discord)")
+        subtitle_lbl = QLabel("Explore Pawchive creators (Patreon, Fanbox, Fantia, Subscribestar)")
         subtitle_lbl.setStyleSheet("font-size: 8.5pt; color: #8A8D93; font-weight: normal;")
         title_col.addWidget(subtitle_lbl)
         header_bar.addLayout(title_col, 1)
 
         # Status & Counter
         self.count_label = QLabel("Loading database…")
-        self.count_label.setStyleSheet("font-size: 8.5pt; color: #7EB6E0; font-weight: bold;")
+        self.count_label.setStyleSheet("font-size: 8.5pt; color: #E5A198; font-weight: bold;")
         header_bar.addWidget(self.count_label)
 
         # View Mode Toggle (Grid vs Table)

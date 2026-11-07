@@ -175,7 +175,7 @@ class VisualSortTabWidget(QWidget):
         )
         title_lbl = QLabel("Visual Sort (AI)")
         title_lbl.setStyleSheet(
-            f"font-size: {int(13 * scale)}pt; font-weight: bold; color: #9BBCE8;"
+            f"font-size: {int(13 * scale)}pt; font-weight: bold; color: #EBB3AC;"
         )
         title_h.addWidget(title_icon)
         title_h.addWidget(title_lbl)
@@ -230,8 +230,8 @@ class VisualSortTabWidget(QWidget):
 
         self.model_status_badge = QLabel("Checking model...")
         self.model_status_badge.setStyleSheet(
-            "font-size: 8pt; font-weight: 500; color: #7EB6E0; background-color: #1E232B; "
-            "border: 1px solid #323A48; border-radius: 4px; padding: 5px 10px;"
+            "font-size: 8pt; font-weight: 500; color: #E5A198; background-color: #2D2528; "
+            "border: 1px solid #483A3E; border-radius: 4px; padding: 5px 10px;"
         )
         mc_layout.addWidget(self.model_status_badge)
 
@@ -359,7 +359,7 @@ class VisualSortTabWidget(QWidget):
 
         # Download / Action Controls
         self.status_label = QLabel("Ready.")
-        self.status_label.setStyleSheet("color: #7EB6E0; font-size: 8.5pt;")
+        self.status_label.setStyleSheet("color: #E5A198; font-size: 8.5pt;")
         layout.addWidget(self.status_label)
 
         self.progress_bar = QProgressBar()
@@ -368,7 +368,7 @@ class VisualSortTabWidget(QWidget):
         self.progress_bar.setFixedHeight(int(16 * scale))
         self.progress_bar.setStyleSheet(
             "QProgressBar { border: 1px solid #3E424B; border-radius: 4px; background: #232528; text-align: center; color: #BAC0CB; font-size: 7.5pt; } "
-            "QProgressBar::chunk { background-color: #2196F3; border-radius: 3px; }"
+            "QProgressBar::chunk { background-color: #B55D52; border-radius: 3px; }"
         )
         self.progress_bar.hide()
         layout.addWidget(self.progress_bar)
