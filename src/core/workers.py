@@ -58,7 +58,7 @@ except ImportError:
     cffi_requests = None
     CURL_CFFI_AVAILABLE = False
 
-from .api_client import download_from_api, fetch_post_comments, fetch_single_post_data, fetch_post_revisions
+from .api_client import download_from_api, fetch_post_comments, fetch_single_post_data, fetch_post_revisions, fetch_creator_profile
 from ..services.multipart_downloader import download_file_in_parts, MULTIPART_DOWNLOADER_AVAILABLE
 from ..services.drive_downloader import (
     download_mega_file, download_gdrive_file, download_dropbox_file
@@ -276,6 +276,69 @@ class PostProcessorWorker:
             self.logger("⚠️ Image compression disabled: Pillow library not found.")
             self.compress_images = False
 
+    def get_resolved_creator_name(self):
+        """Resolves the human-readable creator name with multi-tier fallback."""
+        service = str(getattr(self, 'service', '') or '').lower().strip()
+        user_id = str(getattr(self, 'user_id', '') or '').strip()
+
+        # 1. Check in-memory creator_name_cache
+        if isinstance(getattr(self, 'creator_name_cache', None), dict):
+            cname = (
+                self.creator_name_cache.get((service, user_id))
+                or self.creator_name_cache.get(user_id)
+            )
+            if cname and not str(cname).isdigit() and str(cname) != user_id:
+                return str(cname)
+
+        # 2. Check platform_db creator_mappings
+        if getattr(self, 'platform_db', None) and user_id:
+            try:
+                with self.platform_db.db_lock:
+                    self.platform_db.cursor.execute(
+                        "SELECT original_name FROM creator_mappings WHERE creator_id = ?",
+                        (user_id,)
+                    )
+                    row = self.platform_db.cursor.fetchone()
+                    if row and row[0] and not str(row[0]).isdigit():
+                        resolved = str(row[0]).strip()
+                        if isinstance(getattr(self, 'creator_name_cache', None), dict):
+                            if service:
+                                self.creator_name_cache[(service, user_id)] = resolved
+                            self.creator_name_cache[user_id] = resolved
+                        return resolved
+            except Exception:
+                pass
+
+        # 3. Dynamic profile fetch from API if not yet resolved
+        if service and user_id:
+            try:
+                domain = getattr(self, 'domain_override', None) or "pawchive.pw"
+                profile = fetch_creator_profile(service, user_id, api_domain=domain, proxies=getattr(self, 'proxies', None))
+                if profile and profile.get("name") and not str(profile["name"]).isdigit():
+                    name_found = profile["name"].strip()
+                    if isinstance(getattr(self, 'creator_name_cache', None), dict):
+                        if service:
+                            self.creator_name_cache[(service, user_id)] = name_found
+                        self.creator_name_cache[user_id] = name_found
+                    if getattr(self, 'platform_db', None):
+                        try:
+                            self.platform_db.ensure_creator_table(name_found, creator_id=user_id, service=service)
+                        except Exception:
+                            pass
+                    return name_found
+            except Exception:
+                pass
+
+        # 4. Check post dictionary for metadata
+        post_obj = getattr(self, 'post', {}) or {}
+        if isinstance(post_obj, dict):
+            p_name = post_obj.get('_creator_name') or post_obj.get('creator_name')
+            if p_name and not str(p_name).isdigit():
+                return str(p_name)
+
+        # 5. Fallback
+        return (post_obj.get('user') if isinstance(post_obj, dict) else None) or user_id or "Creator"
+
     def _save_combined_post_document(self, post_save_dir, post_title, post_id, post_page_url, comments_data=None):
         """
         In Combined Download mode, generates a PDF (or DOCX/TXT) containing
@@ -301,13 +364,10 @@ class PostProcessorWorker:
                 final_doc_path = f"{base}_{counter}{ext}"
                 counter += 1
 
-            service_str = self.service or "kemono"
+            service_str = self.service or "patreon"
             user_id_str = str(self.user_id or "")
             post_id_str = str(post_id or "")
-            creator_key = (service_str.lower(), user_id_str)
-            creator_name = user_id_str
-            if self.creator_name_cache:
-                creator_name = self.creator_name_cache.get(creator_key, user_id_str)
+            creator_name = self.get_resolved_creator_name()
 
             # Extract and clean text content
             raw_content = self.post.get('content', '') or ''
@@ -667,10 +727,7 @@ class PostProcessorWorker:
 
                         service = self.service.lower()
                         user_id = str(self.user_id)
-                        
-                        creator_name = user_id 
-                        if self.creator_name_cache:
-                            creator_name = self.creator_name_cache.get((service, user_id), user_id)
+                        creator_name = self.get_resolved_creator_name()
 
                         added_date = self.post.get('added')
                         published_date = self.post.get('published')
@@ -685,16 +742,24 @@ class PostProcessorWorker:
 
                         format_values = {
                             'id': str(self.post.get('id', '')),
+                            'PostID': str(self.post.get('id', '')),
                             'user': user_id,
                             'creator_name': creator_name,
+                            'CreatorName': creator_name,
+                            'creator': creator_name,
                             'service': self.service,
+                            'Service': self.service,
                             'title': title_val,
+                            'Title': title_val,
                             'name': name_val,
                             'added': format_date(added_date or published_date),
                             'published': format_date(published_date),
+                            'Published': format_date(published_date),
                             'edited': format_date(edited_date or published_date),
                             'content': clean_content,
-                            'suffix': format_custom_suffix(self.manga_custom_suffix_format, file_index_in_post + 1)
+                            'Description': clean_content,
+                            'suffix': format_custom_suffix(self.manga_custom_suffix_format, file_index_in_post + 1),
+                            'Suffix': format_custom_suffix(self.manga_custom_suffix_format, file_index_in_post + 1)
                         }
                         
                         custom_base_name = self.manga_custom_filename_format.format(**format_values)
@@ -1357,12 +1422,8 @@ class PostProcessorWorker:
                             phash=calculated_phash
                         )
                         
+                    creator_name = self.get_resolved_creator_name()
                     if getattr(self, 'platform_db', None):
-                        creator_name = None
-                        if isinstance(self.creator_name_cache, dict) and getattr(self, 'service', None) and getattr(self, 'user_id', None):
-                            creator_name = self.creator_name_cache.get((str(self.service).lower(), str(self.user_id))) or self.creator_name_cache.get(str(self.user_id))
-                        if not creator_name:
-                            creator_name = self.post.get('user') or os.path.basename(effective_save_folder)
                         # Use the URL hash (sha256 from CDN path) as the primary identifier.
                         # This is what the pre-download skip check queries, so they must match.
                         try:
@@ -1392,7 +1453,9 @@ class PostProcessorWorker:
                     'service': self.service,
                     'user_id': self.user_id,
                     'api_original_filename': api_original_filename,
-                    'folder_context_name': folder_context_name_for_history or os.path.basename(effective_save_folder)
+                    'folder_context_name': folder_context_name_for_history or os.path.basename(effective_save_folder),
+                    'creator_name': creator_name,
+                    'creator_display_name': creator_name
                 }
                 self._emit_signal('file_successfully_downloaded', downloaded_file_details)
                 time.sleep(0.05)
@@ -1476,7 +1539,8 @@ class PostProcessorWorker:
                 'forced_filename_override': filename_to_save_in_main_path,
                 'service': self.service,
                 'user_id': self.user_id,
-                'creator': getattr(self, 'creator_name_cache', {}).get((str(self.service).lower(), str(self.user_id)), str(self.user_id)),
+                'creator': self.get_resolved_creator_name(),
+                'creator_display_name': self.get_resolved_creator_name(),
                 'api_url_input': self.api_url_input,
                 'published': self.post.get('published'),
                 'added': self.post.get('added'),
@@ -1503,7 +1567,7 @@ class PostProcessorWorker:
 
                 service = self.service.lower()
                 user_id = str(self.user_id)
-                creator_name = self.creator_name_cache.get((service, user_id), user_id)
+                creator_name = self.get_resolved_creator_name()
 
                 added_date = self.post.get('added')
                 published_date = self.post.get('published')
@@ -1511,13 +1575,19 @@ class PostProcessorWorker:
 
                 format_values = {
                     'id': str(self.post.get('id', '')),
+                    'PostID': str(self.post.get('id', '')),
                     'user': user_id,
                     'creator_name': creator_name,
+                    'CreatorName': creator_name,
+                    'creator': creator_name,
                     'service': self.service,
+                    'Service': self.service,
                     'title': str(self.post.get('title', '')),
+                    'Title': str(self.post.get('title', '')),
                     'name': robust_clean_name(post_title),
                     'added': format_date(added_date or published_date),
                     'published': format_date(published_date),
+                    'Published': format_date(published_date),
                     'edited': format_date(edited_date or published_date)
                 }
                 
@@ -2009,11 +2079,7 @@ class PostProcessorWorker:
                 service_str = self.service
                 user_id_str = str(self.user_id)
                 post_id_str = str(post_id)
-                creator_key = (service_str.lower(), user_id_str)
-                
-                creator_name = user_id_str
-                if self.creator_name_cache:
-                    creator_name = self.creator_name_cache.get(creator_key, user_id_str)
+                creator_name = self.get_resolved_creator_name()
 
                 common_content_data = {
                     'title': post_title,
@@ -2615,11 +2681,7 @@ class PostProcessorWorker:
             with ThreadPoolExecutor(max_workers=self.num_file_threads, thread_name_prefix=f'P{post_id}File_') as file_pool:
                 futures_list = []
                 queued_files_for_ui = []
-                creator_display = ""
-                if hasattr(self, 'creator_name_cache') and self.creator_name_cache:
-                    creator_display = self.creator_name_cache.get(self.user_id, "")
-                if not creator_display:
-                    creator_display = post_data.get('user') or getattr(self, 'user_id', "") or "Creator"
+                creator_display = self.get_resolved_creator_name()
                 has_logged_ambiguous_title = False
                 for file_idx, file_info_to_dl in enumerate(files_to_download_info_list):
                     if self._check_pause(f"File processing loop for post {post_id}, file {file_idx}"): break
@@ -3158,6 +3220,21 @@ class DownloadThread(QThread):
             worker_signals_obj.worker_finished_signal.connect(lambda result: None)
             worker_signals_obj.files_queued_signal.connect(self.files_queued_signal)
             worker_signals_obj.file_skipped_signal.connect(self.file_skipped_signal)
+
+            # Ensure creator name is resolved and cached prior to queueing files
+            if getattr(self, 'service', None) and getattr(self, 'user_id', None) and isinstance(self.creator_name_cache, dict):
+                ckey = (str(self.service).lower(), str(self.user_id))
+                cname = self.creator_name_cache.get(ckey) or self.creator_name_cache.get(str(self.user_id))
+                if not cname or str(cname).isdigit():
+                    try:
+                        domain = getattr(self, 'domain_override', None) or "pawchive.pw"
+                        profile = fetch_creator_profile(self.service, self.user_id, api_domain=domain, proxies=self.proxies)
+                        if profile and profile.get("name") and not str(profile["name"]).isdigit():
+                            resolved_n = profile["name"].strip()
+                            self.creator_name_cache[ckey] = resolved_n
+                            self.creator_name_cache[str(self.user_id)] = resolved_n
+                    except Exception:
+                        pass
 
             self.logger("   Starting post fetch (single-threaded download process)...")
 

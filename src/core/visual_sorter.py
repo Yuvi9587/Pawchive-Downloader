@@ -21,10 +21,16 @@ class VisualSorter:
                     cls._instance = cls(model_path, csv_path)
         return cls._instance
 
+    @staticmethod
+    def _get_settings():
+        base_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        ini_path = os.path.join(base_dir, "appdata", "config.ini")
+        return QSettings(ini_path, QSettings.IniFormat)
+
     def __init__(self, model_path, csv_path):
         import onnxruntime as ort 
         
-        settings = QSettings("MediaDownloader", "VisualSort")
+        settings = self._get_settings()
         hw_choice = settings.value("execution_provider", "cpu", type=str)
         
         providers = ["CPUExecutionProvider"]
@@ -107,15 +113,15 @@ class VisualSorter:
                         self.fallback_rules.append((char_name, rule_tags, negative_tags, mandatory_tags))
 
     def get_current_threshold(self):
-        settings = QSettings("MediaDownloader", "VisualSort")
+        settings = self._get_settings()
         return settings.value("char_threshold", 50, type=int) / 100.0
 
     def get_fallback_threshold(self):
-        settings = QSettings("MediaDownloader", "VisualSort")
+        settings = self._get_settings()
         return settings.value("fallback_threshold", 30, type=int) / 100.0
 
     def get_fallback_match_count(self):
-        settings = QSettings("MediaDownloader", "VisualSort")
+        settings = self._get_settings()
         return settings.value("fallback_tag_matches", 3, type=int)
 
     def is_skin_tag(self, tag):

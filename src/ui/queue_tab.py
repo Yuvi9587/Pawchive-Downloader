@@ -516,6 +516,14 @@ class QueueTabWidget(QWidget):
             if file_key not in self.files_data:
                 size = finfo.get('size', 0) or 0
                 creator = finfo.get('creator') or getattr(self.parent_app, 'last_known_creator_name', "") or "Creator"
+                if (not creator or creator == "Creator" or str(creator).isdigit()) and hasattr(self, 'parent_app') and self.parent_app:
+                    parent_cname = getattr(self.parent_app, 'last_known_creator_name', "")
+                    if parent_cname and not str(parent_cname).isdigit():
+                        creator = parent_cname
+                    elif hasattr(self.parent_app, 'creator_name_cache'):
+                        c_from_cache = self.parent_app.creator_name_cache.get(str(creator))
+                        if c_from_cache and not str(c_from_cache).isdigit():
+                            creator = c_from_cache
                 self.files_data[file_key] = {
                     'id': file_key,
                     'filename': fname,
@@ -706,10 +714,11 @@ class QueueTabWidget(QWidget):
             file_key = disk_name or orig_name
             if not file_key:
                 return
+            resolved_c = file_details_dict.get('creator_display_name') or file_details_dict.get('creator_name') or getattr(self.parent_app, 'last_known_creator_name', "") or "Creator"
             self.files_data[file_key] = {
                 'id': file_key,
                 'filename': disk_name or orig_name,
-                'creator': file_details_dict.get('creator_display_name', "Creator"),
+                'creator': resolved_c,
                 'status': 'completed',
                 'downloaded_bytes': 0,
                 'total_bytes': 0,
@@ -737,8 +746,25 @@ class QueueTabWidget(QWidget):
             file_details_dict.get('download_path', ""),
             disk_name or orig_name
         )
-        if file_details_dict.get('creator_display_name'):
-            file_item['creator'] = file_details_dict['creator_display_name']
+        incoming_creator = str(file_details_dict.get('creator_display_name') or file_details_dict.get('creator_name') or "").strip()
+        current_creator = str(file_item.get('creator') or "").strip()
+
+        is_incoming_generic = not incoming_creator or incoming_creator.lower() in ("unknown creator/series", "unknown creator", "creator", "unknown")
+        is_current_generic = not current_creator or current_creator.lower() in ("unknown creator/series", "unknown creator", "creator", "unknown", "active post", "skipped file")
+
+        if not is_incoming_generic:
+            if not incoming_creator.isdigit() or is_current_generic:
+                file_item['creator'] = incoming_creator
+        elif is_current_generic:
+            best_creator = ""
+            if hasattr(self, 'parent_app') and self.parent_app:
+                best_creator = getattr(self.parent_app, 'last_known_creator_name', "")
+                if not best_creator and hasattr(self.parent_app, 'creator_name_cache'):
+                    svc = (file_details_dict.get('service') or "").lower()
+                    uid = str(file_details_dict.get('user_id') or "")
+                    best_creator = self.parent_app.creator_name_cache.get((svc, uid)) or self.parent_app.creator_name_cache.get(uid) or ""
+            if best_creator and best_creator.lower() not in ("unknown creator/series", "unknown creator", "creator", "unknown"):
+                file_item['creator'] = best_creator
 
         # Determine file size from disk if available
         if file_item['save_path'] and os.path.exists(file_item['save_path']):

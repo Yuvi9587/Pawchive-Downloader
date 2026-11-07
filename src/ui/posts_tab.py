@@ -1487,6 +1487,15 @@ class PostsTabWidget(QWidget):
         if not post:
             return
         url = self._get_post_direct_url(post)
+        cname = (post.get("_creator_name") or "").strip()
+        cid = str(post.get("_creator_id") or post.get("user") or "").strip()
+        csvc = (post.get("_creator_service") or post.get("service") or "").lower().strip()
+        if hasattr(self.parent_app, 'creator_name_cache') and cname and cid:
+            if csvc:
+                self.parent_app.creator_name_cache[(csvc, cid)] = cname
+            self.parent_app.creator_name_cache[cid] = cname
+        if cname:
+            self.parent_app.last_known_creator_name = cname
         if hasattr(self.parent_app, 'link_input') and self.parent_app.link_input:
             self.parent_app.link_input.setText(url)
 
@@ -1602,7 +1611,17 @@ class PostsTabWidget(QWidget):
             if hasattr(self.parent_app, 'switch_tab'):
                 self.parent_app.switch_tab(0)
         else:
-            first_url = self._get_post_direct_url(selected_posts[0])
+            first_post = selected_posts[0]
+            first_url = self._get_post_direct_url(first_post)
+            cname = (first_post.get("_creator_name") or "").strip()
+            cid = str(first_post.get("_creator_id") or first_post.get("user") or "").strip()
+            csvc = (first_post.get("_creator_service") or first_post.get("service") or "").lower().strip()
+            if hasattr(self.parent_app, 'creator_name_cache') and cname and cid:
+                if csvc:
+                    self.parent_app.creator_name_cache[(csvc, cid)] = cname
+                self.parent_app.creator_name_cache[cid] = cname
+            if cname:
+                self.parent_app.last_known_creator_name = cname
             if hasattr(self.parent_app, 'link_input') and self.parent_app.link_input:
                 self.parent_app.link_input.setText(first_url)
             if hasattr(self.parent_app, 'switch_tab'):

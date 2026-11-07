@@ -108,9 +108,15 @@ class VisualSortTabWidget(QWidget):
         self.parent_app = parent_app
         self.scale = scale
 
-        self.settings = QSettings("MediaDownloader", "VisualSort")
+        if hasattr(parent_app, 'settings') and parent_app.settings:
+            self.settings = parent_app.settings
+        else:
+            base_dir = getattr(parent_app, 'app_base_dir', '') or (os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+            ini_path = os.path.join(base_dir, "appdata", "config.ini")
+            self.settings = QSettings(ini_path, QSettings.IniFormat)
 
-        self.models_dir = os.path.abspath(os.path.join("appdata", "models"))
+        base_dir = getattr(parent_app, 'app_base_dir', '') or (os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+        self.models_dir = os.path.join(base_dir, "appdata", "models")
         self.model_path = os.path.join(self.models_dir, "model.onnx")
         self.csv_path = os.path.join(self.models_dir, "selected_tags.csv")
         self.fallback_path = os.path.join(self.models_dir, "fallback.csv")
@@ -604,7 +610,8 @@ class VisualSortTabWidget(QWidget):
         layout.addWidget(series_group, 1)
 
     def _populate_series_checkboxes(self):
-        known_path = self.parent_app.config_file if (self.parent_app and hasattr(self.parent_app, 'config_file')) else os.path.abspath(os.path.join("appdata", "Known.txt"))
+        base_dir = getattr(self.parent_app, 'app_base_dir', '') or (os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+        known_path = self.parent_app.config_file if (self.parent_app and hasattr(self.parent_app, 'config_file')) else os.path.join(base_dir, "appdata", "Known.txt")
 
         categories = []
         if os.path.exists(known_path):
@@ -818,7 +825,8 @@ class VisualSortTabWidget(QWidget):
         self.worker.start()
 
     def _start_known_txt_download(self):
-        target_path = self.parent_app.config_file if (self.parent_app and hasattr(self.parent_app, 'config_file')) else os.path.abspath(os.path.join("appdata", "Known.txt"))
+        base_dir = getattr(self.parent_app, 'app_base_dir', '') or (os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+        target_path = self.parent_app.config_file if (self.parent_app and hasattr(self.parent_app, 'config_file')) else os.path.join(base_dir, "appdata", "Known.txt")
         target_dir = os.path.dirname(target_path)
 
         if os.path.exists(target_path):
@@ -904,7 +912,8 @@ class VisualSortTabWidget(QWidget):
             self.update_fallback_btn.setEnabled(False)
 
     def _check_for_known_updates(self):
-        known_path = self.parent_app.config_file if (self.parent_app and hasattr(self.parent_app, 'config_file')) else os.path.abspath(os.path.join("appdata", "Known.txt"))
+        base_dir = getattr(self.parent_app, 'app_base_dir', '') or (os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+        known_path = self.parent_app.config_file if (self.parent_app and hasattr(self.parent_app, 'config_file')) else os.path.join(base_dir, "appdata", "Known.txt")
         local_etag = self.latest_known_etag if os.path.exists(known_path) else ""
         self.known_checker = UpdateCheckerThread(self.known_txt_url, local_etag)
         self.known_checker.update_available_signal.connect(self._on_known_check_result)

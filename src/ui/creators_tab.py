@@ -631,6 +631,16 @@ class CreatorsTabWidget(QWidget):
         if creators:
             self.count_label.setText(f"{len(creators):,} creators cached")
             self._apply_filter()
+            if hasattr(self.parent_app, 'creator_name_cache') and isinstance(self.parent_app.creator_name_cache, dict):
+                for c in creators:
+                    cid = str(c.get("id", "")).strip()
+                    cname = (c.get("name") or "").strip()
+                    csvc = (c.get("service") or "").lower().strip()
+                    if cid and cname:
+                        if csvc:
+                            self.parent_app.creator_name_cache[(csvc, cid)] = cname
+                        if cid not in self.parent_app.creator_name_cache:
+                            self.parent_app.creator_name_cache[cid] = cname
         else:
             self.count_label.setText("No local database found. Click 'Sync with API' to fetch.")
 
@@ -760,6 +770,15 @@ class CreatorsTabWidget(QWidget):
         if len(creators) == 1:
             creator = creators[0]
             url = self._get_creator_url(creator)
+            cname = (creator.get("name") or "").strip()
+            cid = str(creator.get("id", "")).strip()
+            csvc = (creator.get("service") or "").lower().strip()
+            if hasattr(self.parent_app, 'creator_name_cache') and cname and cid:
+                if csvc:
+                    self.parent_app.creator_name_cache[(csvc, cid)] = cname
+                self.parent_app.creator_name_cache[cid] = cname
+            if cname:
+                self.parent_app.last_known_creator_name = cname
             if hasattr(self.parent_app, 'link_input') and self.parent_app.link_input:
                 self.parent_app.link_input.setText(url)
 
@@ -893,6 +912,16 @@ class CreatorsTabWidget(QWidget):
                 if (c.get("service") or "").lower().strip() in SUPPORTED_PLATFORMS
             ]
             self._apply_filter()
+            if hasattr(self.parent_app, 'creator_name_cache') and isinstance(self.parent_app.creator_name_cache, dict):
+                for c in self.all_creators:
+                    cid = str(c.get("id", "")).strip()
+                    cname = (c.get("name") or "").strip()
+                    csvc = (c.get("service") or "").lower().strip()
+                    if cid and cname:
+                        if csvc:
+                            self.parent_app.creator_name_cache[(csvc, cid)] = cname
+                        if cid not in self.parent_app.creator_name_cache:
+                            self.parent_app.creator_name_cache[cid] = cname
             self.count_label.setText(message)
             if hasattr(self.parent_app, 'log_signal'):
                 self.parent_app.log_signal.emit(f"Creators directory synced: {len(data):,} creators loaded.")

@@ -7,19 +7,31 @@ _app_icon_cache = None
 def get_asset_path(filename):
     """
     Return the path to an asset, works in both dev and packaged environments.
-    Handles --onedir where sys._MEIPASS is the _internal folder.
+    Checks sys._MEIPASS (_internal), the executable directory, and dev workspace.
     """
-    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
-        base_path = sys._MEIPASS
-    else:
-        base_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-        
-    # If the filename already starts with 'assets', don't duplicate it.
-    normalized_filename = filename.replace('\\', '/')
+    normalized_filename = filename.replace('\\', '/').lstrip('/')
     if not normalized_filename.startswith('assets/'):
-        return os.path.join(base_path, 'assets', filename)
-    
-    return os.path.join(base_path, filename)
+        rel_path = os.path.join('assets', normalized_filename)
+    else:
+        rel_path = normalized_filename
+
+    candidates = []
+    if getattr(sys, 'frozen', False):
+        if hasattr(sys, '_MEIPASS'):
+            candidates.append(sys._MEIPASS)
+        exe_dir = os.path.dirname(sys.executable)
+        candidates.append(exe_dir)
+        candidates.append(os.path.join(exe_dir, '_internal'))
+    else:
+        candidates.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+
+    for base in candidates:
+        full = os.path.normpath(os.path.join(base, rel_path))
+        if os.path.exists(full):
+            return full
+
+    primary_base = candidates[0] if candidates else os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+    return os.path.normpath(os.path.join(primary_base, rel_path))
 
 def get_asset_html_path(filename):
     """
@@ -30,8 +42,7 @@ def get_asset_html_path(filename):
     correct forward-slash file:/// URL format (e.g. file:///C:/Users/...).
     """
     path = get_asset_path(filename)
-    # Convert backslashes to forward slashes and prepend file:///
-    return 'file:///' + path.replace('\\', '/')
+    return 'file:///' + path.replace('\\', '/').lstrip('/')
 
 def get_app_icon_object():
     """

@@ -24,17 +24,30 @@ class DownloadHistoryDialog (QDialog ):
         creator_name_cache = getattr(parent_app, 'creator_name_cache', None)
         if creator_name_cache:
             for entry in self.last_3_downloaded_entries:
-                if not entry.get('creator_display_name'):
+                cname = entry.get('creator_display_name') or entry.get('creator_name')
+                if not cname or str(cname).isdigit() or str(cname).lower() in ('unknown creator/series', 'unknown creator', 'creator', 'unknown'):
                     service = entry.get('service', '').lower()
                     user_id = str(entry.get('user_id', ''))
                     key = (service, user_id)
-                    entry['creator_display_name'] = creator_name_cache.get(key, entry.get('folder_context_name', 'Unknown Creator/Series'))
+                    entry['creator_display_name'] = (
+                        creator_name_cache.get(key)
+                        or creator_name_cache.get(user_id)
+                        or entry.get('folder_context_name')
+                        or getattr(parent_app, 'last_known_creator_name', '')
+                        or (user_id if user_id else 'Creator')
+                    )
             for entry in self.first_processed_entries:
-                if not entry.get('creator_name'):
+                cname = entry.get('creator_name') or entry.get('creator_display_name')
+                if not cname or str(cname).isdigit() or str(cname).lower() in ('unknown creator/series', 'unknown creator', 'creator', 'unknown'):
                     service = entry.get('service', '').lower()
                     user_id = str(entry.get('user_id', ''))
                     key = (service, user_id)
-                    entry['creator_name'] = creator_name_cache.get(key, entry.get('user_id', 'Unknown'))
+                    entry['creator_name'] = (
+                        creator_name_cache.get(key)
+                        or creator_name_cache.get(user_id)
+                        or getattr(parent_app, 'last_known_creator_name', '')
+                        or (user_id if user_id else 'Creator')
+                    )
 
         app_icon =get_app_icon_object ()
         if not app_icon .isNull ():

@@ -539,3 +539,53 @@ def download_from_api(
         
     if target_post_id and not processed_target_post_flag and not (cancellation_event and cancellation_event.is_set()):
         logger(f"❌ Target post {target_post_id} could not be found after checking all relevant pages (final check after loop).")
+
+
+def fetch_creator_profile(service, user_id, api_domain="pawchive.pw", headers=None, proxies=None, cookies_dict=None):
+    """
+    Fetches creator metadata from /api/v1/{service}/user/{user_id}/profile or HTML user page.
+    Returns dict with {'name': str, 'id': str, 'service': str} or None on failure.
+    """
+    if not service or not user_id:
+        return None
+    service_str = str(service).lower().strip()
+    user_id_str = str(user_id).strip()
+    profile_url = f"https://{api_domain}/api/v1/{service_str}/user/{user_id_str}/profile"
+
+    req_headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json"
+    }
+    if headers and isinstance(headers, dict):
+        req_headers.update(headers)
+
+    # 1. Try JSON profile endpoint
+    try:
+        with requests.get(profile_url, headers=req_headers, timeout=8, cookies=cookies_dict, proxies=proxies, verify=False) as resp:
+            if resp.status_code == 200:
+                data = resp.json()
+                if isinstance(data, dict) and data.get("name"):
+                    return {"name": str(data["name"]).strip(), "id": user_id_str, "service": service_str}
+                elif isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict) and data[0].get("name"):
+                    return {"name": str(data[0]["name"]).strip(), "id": user_id_str, "service": service_str}
+    except Exception:
+        pass
+
+    # 2. Fallback to HTML user page title
+    try:
+        import re
+        user_url = f"https://{api_domain}/{service_str}/user/{user_id_str}"
+        with requests.get(user_url, headers=req_headers, timeout=8, cookies=cookies_dict, proxies=proxies, verify=False) as resp:
+            if resp.status_code == 200:
+                m = re.search(r'<title>([^<|]+)', resp.text)
+                if m:
+                    cand = m.group(1).strip()
+                    if cand and cand.lower() not in ('pawchive', 'kemono', 'coomer', 'error', '404', 'not found', 'untitled'):
+                        return {"name": cand, "id": user_id_str, "service": service_str}
+    except Exception:
+        pass
+
+    return None

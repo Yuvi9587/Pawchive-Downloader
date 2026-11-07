@@ -46,7 +46,7 @@ from ..services.drive_downloader import (
 )
 from ..core.workers import DownloadThread as BackendDownloadThread, PostProcessorWorker, PostProcessorSignals
 from ..services.multipart_downloader import download_file_in_parts, MULTIPART_DOWNLOADER_AVAILABLE
-from ..core.api_client import download_from_api
+from ..core.api_client import download_from_api, fetch_creator_profile
 from ..core.discord_client import fetch_server_channels, fetch_channel_messages 
 from ..core.manager import DownloadManager
 from ..core.platform_database import PlatformDatabaseManager
@@ -2414,9 +2414,9 @@ class DownloaderApp (QWidget ):
             self.log_signal.emit(f"❌ Error saving persistent history to {self.persistent_history_file}: {e}")
 
    
-    def _load_creator_name_cache_from_json (self ):
-        """Loads creator id-name-service mappings from creators.json into self.creator_name_cache."""
-        self .log_signal .emit ("ℹ️ Attempting to load creators.json for creator name cache.")
+    def _load_creator_name_cache_from_json(self):
+        """Loads creator id-name-service mappings from creators.json and pawchive.db into self.creator_name_cache."""
+        self.log_signal.emit("ℹ️ Loading creator name cache...")
 
         creators_file_path = os.path.join(self.app_base_dir, "data", "creators.json")
         if not os.path.exists(creators_file_path):
@@ -2424,38 +2424,127 @@ class DownloaderApp (QWidget ):
             if os.path.exists(bundled_path):
                 creators_file_path = bundled_path
 
-        if not os .path .exists (creators_file_path ):
-            self .log_signal .emit (f"⚠️ 'creators.json' not found at {creators_file_path }. Creator name cache will be empty.")
-            self .creator_name_cache .clear ()
-            return 
+        if os.path.exists(creators_file_path):
+            try:
+                with open(creators_file_path, 'r', encoding='utf-8') as f:
+                    loaded_data = json.load(f)
 
-        try :
-            with open (creators_file_path ,'r',encoding ='utf-8')as f :
-                loaded_data =json .load (f )
+                creators_list = []
+                if isinstance(loaded_data, list) and len(loaded_data) > 0 and isinstance(loaded_data[0], list):
+                    creators_list = loaded_data[0]
+                elif isinstance(loaded_data, list) and all(isinstance(item, dict) for item in loaded_data):
+                    creators_list = loaded_data
 
-            creators_list =[]
-            if isinstance (loaded_data ,list )and len (loaded_data )>0 and isinstance (loaded_data [0 ],list ):
-                creators_list =loaded_data [0 ]
-            elif isinstance (loaded_data ,list )and all (isinstance (item ,dict )for item in loaded_data ):
-                creators_list =loaded_data 
-            else :
-                self .log_signal .emit (f"⚠️ 'creators.json' has an unexpected format. Creator name cache may be incomplete.")
+                for creator_data in creators_list:
+                    creator_id = str(creator_data.get("id", "")).strip()
+                    name = (creator_data.get("name") or "").strip()
+                    service = (creator_data.get("service") or "").lower().strip()
+                    if creator_id and name:
+                        if service:
+                            self.creator_name_cache[(service, creator_id)] = name
+                        if creator_id not in self.creator_name_cache or str(self.creator_name_cache[creator_id]).isdigit():
+                            self.creator_name_cache[creator_id] = name 
 
-            for creator_data in creators_list:
-                creator_id = str(creator_data.get("id", "")).strip()
-                name = (creator_data.get("name") or "").strip()
-                service = (creator_data.get("service") or "").lower().strip()
-                if creator_id and name:
-                    if service:
-                        self.creator_name_cache[(service, creator_id)] = name
-                    if creator_id not in self.creator_name_cache:
-                        self.creator_name_cache[creator_id] = name 
-         
-            print(f"DEBUG: Loaded {len(self.creator_name_cache)} creators from {creators_file_path}")
-            self .log_signal .emit (f"✅ Successfully loaded {len (self .creator_name_cache )} creator names into cache from 'creators.json'.")
-        except Exception as e :
-            self .log_signal .emit (f"❌ Error loading 'creators.json' for name cache: {e }")
-            self .creator_name_cache .clear ()
+                self.log_signal.emit(f"✅ Loaded {len(self.creator_name_cache)} creator names into cache from 'creators.json'.")
+            except Exception as e:
+                self.log_signal.emit(f"❌ Error loading 'creators.json' for name cache: {e}")
+
+        # Always load all creator mappings from pawchive.db into cache as well
+        db_path = os.path.join(self.app_base_dir, "appdata", "databases", "pawchive.db")
+        if os.path.exists(db_path):
+            try:
+                import sqlite3
+                conn = sqlite3.connect(db_path)
+                cursor = conn.cursor()
+                cursor.execute("SELECT original_name, creator_id, service FROM creator_mappings")
+                rows = cursor.fetchall()
+                conn.close()
+                db_added = 0
+                for orig_name, cid, svc in rows:
+                    if orig_name and cid and not str(orig_name).isdigit():
+                        cid_str = str(cid).strip()
+                        svc_str = (svc or "").lower().strip()
+                        if svc_str:
+                            self.creator_name_cache[(svc_str, cid_str)] = orig_name.strip()
+                        if cid_str not in self.creator_name_cache or str(self.creator_name_cache[cid_str]).isdigit():
+                            self.creator_name_cache[cid_str] = orig_name.strip()
+                        db_added += 1
+                if db_added > 0:
+                    self.log_signal.emit(f"💾 Loaded {db_added} creator mappings from local database into cache.")
+            except Exception:
+                pass
+
+    def resolve_creator_name(self, service, user_id):
+        """
+        Resolves a creator ID to a human-readable name using:
+        1. In-memory cache
+        2. Database creator_mappings
+        3. Online Pawchive API /profile or user page HTML
+        Caches and returns the discovered name, or user_id as fallback.
+        """
+        svc = (service or "").lower().strip()
+        uid = str(user_id or "").strip()
+        if not uid:
+            return ""
+
+        # 1. Check in-memory cache
+        if svc and (svc, uid) in self.creator_name_cache:
+            cand = self.creator_name_cache[(svc, uid)]
+            if cand and not str(cand).isdigit() and cand != uid:
+                self.last_known_creator_name = cand
+                return cand
+        if uid in self.creator_name_cache:
+            cand = self.creator_name_cache[uid]
+            if cand and not str(cand).isdigit() and cand != uid:
+                self.last_known_creator_name = cand
+                return cand
+
+        # 2. Check local database
+        db_path = os.path.join(self.app_base_dir, "appdata", "databases", "pawchive.db")
+        if os.path.exists(db_path):
+            try:
+                import sqlite3
+                conn = sqlite3.connect(db_path)
+                cursor = conn.cursor()
+                cursor.execute("SELECT original_name FROM creator_mappings WHERE creator_id = ?", (uid,))
+                row = cursor.fetchone()
+                conn.close()
+                if row and row[0] and not str(row[0]).isdigit():
+                    found_name = str(row[0]).strip()
+                    if svc:
+                        self.creator_name_cache[(svc, uid)] = found_name
+                    self.creator_name_cache[uid] = found_name
+                    self.last_known_creator_name = found_name
+                    return found_name
+            except Exception:
+                pass
+
+        # 3. Dynamic lookup from Pawchive API /profile
+        if svc and uid:
+            try:
+                current_proxies = None
+                try:
+                    current_proxies = self._get_current_ui_settings_as_dict().get('proxies')
+                except Exception:
+                    pass
+
+                profile = fetch_creator_profile(svc, uid, proxies=current_proxies)
+                if profile and profile.get("name") and not str(profile["name"]).isdigit():
+                    name_found = str(profile["name"]).strip()
+                    if svc:
+                        self.creator_name_cache[(svc, uid)] = name_found
+                    self.creator_name_cache[uid] = name_found
+                    self.last_known_creator_name = name_found
+                    try:
+                        db_mgr = PlatformDatabaseManager.get_instance("pawchive", os.path.join(self.app_base_dir, 'appdata'))
+                        db_mgr.ensure_creator_table(name_found, creator_id=uid, service=svc)
+                    except Exception:
+                        pass
+                    return name_found
+            except Exception:
+                pass
+
+        return uid
 
     def _show_download_history_dialog (self ):
         """Shows the dialog with the finalized download history."""
@@ -2478,9 +2567,48 @@ class DownloaderApp (QWidget ):
         if not file_details_dict :
             return 
         file_details_dict ['download_timestamp']=time .time ()
-        creator_key =(file_details_dict .get ('service','').lower (),str (file_details_dict .get ('user_id','')))
-        file_details_dict ['creator_display_name']=self .creator_name_cache .get (creator_key ,file_details_dict .get ('folder_context_name','Unknown Creator/Series'))
-        self .last_downloaded_files_details .append (file_details_dict )
+        service = (file_details_dict.get('service') or '').lower().strip()
+        user_id = str(file_details_dict.get('user_id') or '').strip()
+        creator_key = (service, user_id)
+
+        # 1. Prefer worker-provided creator name if valid
+        creator_display = (
+            file_details_dict.get('creator_display_name')
+            or file_details_dict.get('creator_name')
+        )
+
+        # 2. If missing or generic, check cache or last_known
+        if not creator_display or str(creator_display).isdigit() or str(creator_display).lower() in ('unknown creator/series', 'unknown creator', 'creator', 'unknown'):
+            creator_display = (
+                self.creator_name_cache.get(creator_key)
+                or self.creator_name_cache.get(user_id)
+                or getattr(self, 'last_known_creator_name', '')
+            )
+
+        # 3. If still not resolved, query database / API
+        if not creator_display or str(creator_display).isdigit() or str(creator_display).lower() in ('unknown creator/series', 'unknown creator', 'creator', 'unknown'):
+            if service and user_id:
+                resolved = self.resolve_creator_name(service, user_id)
+                if resolved and not str(resolved).isdigit():
+                    creator_display = resolved
+
+        # 4. Fallback to folder context name or user_id
+        if not creator_display or str(creator_display).lower() in ('unknown creator/series', 'unknown'):
+            folder_ctx = file_details_dict.get('folder_context_name', '').strip()
+            if folder_ctx and folder_ctx.lower() not in ('unknown creator/series', 'unknown', ''):
+                creator_display = folder_ctx
+            elif user_id:
+                creator_display = user_id
+            else:
+                creator_display = 'Creator'
+
+        file_details_dict['creator_display_name'] = creator_display
+        if creator_key[0] and creator_key[1] and creator_display and not str(creator_display).isdigit():
+            self.creator_name_cache[creator_key] = creator_display
+            self.creator_name_cache[user_id] = creator_display
+            self.last_known_creator_name = creator_display
+
+        self.last_downloaded_files_details.append(file_details_dict)
         if hasattr(self, 'queue_tab') and self.queue_tab:
             try:
                 self.queue_tab.on_file_completed(file_details_dict)
@@ -4789,6 +4917,10 @@ class DownloaderApp (QWidget ):
         self.cancellation_message_logged_this_session = False
         
         service, id1, id2 = extract_post_info(api_url)
+        if id1:
+            resolved_creator = self.resolve_creator_name(service, id1)
+            if resolved_creator and not str(resolved_creator).isdigit():
+                self.last_known_creator_name = resolved_creator
 
         ui_settings = self._get_current_ui_settings_as_dict(
             api_url_override=api_url, 
@@ -4881,9 +5013,14 @@ class DownloaderApp (QWidget ):
                 else:
                     if service:
                         creator_key = (service.lower(), str(user_id))
-                        creator_name_for_profile = self.creator_name_cache.get(creator_key)
+                        creator_name_for_profile = self.creator_name_cache.get(creator_key) or self.creator_name_cache.get(str(user_id))
                     else:
-                        creator_name_for_profile = None
+                        creator_name_for_profile = self.creator_name_cache.get(str(user_id))
+
+                if not creator_name_for_profile or str(creator_name_for_profile).isdigit():
+                    resolved = self.resolve_creator_name(service, user_id)
+                    if resolved and not str(resolved).isdigit():
+                        creator_name_for_profile = resolved
 
                 if not creator_name_for_profile:
                     safe_service = service if service else "unknown"
@@ -7369,8 +7506,9 @@ class DownloaderApp (QWidget ):
         # workers.py falls back to self.post.get('user') when the name cache misses,
         # so we must inject the correct name here — otherwise post_title ends up as the DB table name.
         retry_creator_name = job_details.get('creator_name') or job_details.get('creator')
-        if not retry_creator_name and service and user_id and hasattr(self, 'creator_name_cache'):
-            retry_creator_name = self.creator_name_cache.get((service.lower(), str(user_id)), str(user_id))
+        if not retry_creator_name or str(retry_creator_name).isdigit() or str(retry_creator_name).lower() in ('unknown', 'unknown_creator', 'creator'):
+            if service and user_id:
+                retry_creator_name = self.resolve_creator_name(service, user_id)
         if not retry_creator_name:
             retry_creator_name = str(user_id) if user_id else 'unknown_creator'
 
@@ -7396,8 +7534,8 @@ class DownloaderApp (QWidget ):
                 base_dir = ""
 
         if not override_dir or (base_dir and os.path.normpath(override_dir) == os.path.normpath(base_dir)):
-            if service and user_id and hasattr(self, 'creator_name_cache'):
-                creator_name = self.creator_name_cache.get((service.lower(), str(user_id)), str(user_id))
+            if service and user_id:
+                creator_name = self.resolve_creator_name(service, user_id)
                 safe_creator_name = clean_folder_name(creator_name)
                 
                 if safe_creator_name and base_dir:

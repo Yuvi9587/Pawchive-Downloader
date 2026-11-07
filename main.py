@@ -22,6 +22,12 @@ from PySide6.QtWidgets import QApplication, QDialog
 from PySide6.QtCore import QCoreApplication
 from PySide6.QtGui import QIcon
 
+try:
+    import PySide6.QtSvg
+    import PySide6.QtSvgWidgets
+except ImportError:
+    pass
+
 # --- Local Application Imports ---
 from src.ui.main_window import DownloaderApp
 from src.core.visual_sorter import VisualSorter
@@ -109,6 +115,18 @@ def main():
             )
         except Exception:
             pass  # Non-Windows platforms silently skip this.
+
+        # Register Qt plugin paths for image formats (SVG, ICO, WebP) and platforms
+        plugin_dirs = [
+            os.path.join(APP_RESOURCE_DIR, 'PySide6', 'plugins'),
+            os.path.join(APP_RESOURCE_DIR, 'plugins'),
+            os.path.join(APP_RUNTIME_DIR, '_internal', 'PySide6', 'plugins'),
+            os.path.join(APP_RUNTIME_DIR, '_internal', 'plugins'),
+            os.path.join(APP_RUNTIME_DIR, 'plugins'),
+        ]
+        for p_dir in plugin_dirs:
+            if os.path.isdir(p_dir):
+                QCoreApplication.addLibraryPath(p_dir)
 
         qt_app = QApplication(sys.argv)
         qt_app.setStyle("Fusion")
