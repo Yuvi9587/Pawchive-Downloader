@@ -187,9 +187,9 @@ Bug reports, suggestions, and pull requests are all welcome.
 
 If Pawchive Downloader has been useful to you, you can help keep it maintained and growing:
 
-- **Ko-fi**: [Support on Ko-fi](https://ko-fi.com/)
+- **Ko-fi**: [Support on Ko-fi](https://ko-fi.com/yuvi427183)
 - **Patreon**: [Support on Patreon](https://patreon.com/)
-- **Buy Me a Coffee**: [Buy Me a Coffee](https://buymeacoffee.com/)
+- **Buy Me a Coffee**: [Buy Me a Coffee](https://buymeacoffee.com/yuvi9587)
 
 The **Support** tab inside the app also has donation and community links.
 
