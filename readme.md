@@ -15,7 +15,7 @@ A desktop app for downloading and organizing content from Pawchive.
 
 Pawchive Downloader is a desktop app for archiving content from **Pawchive** (`pawchive.st` and `pawchive.pw`). It's written in Python with PySide6 (Qt), has a dark interface, and uses a download engine that can handle big creator archives without choking.
 
-It works for pretty much any kind of content: artwork, photo sets, videos, audio, and text posts. Downloads run in parallel, rate limits are handled for you, anything that fails gets retried at the end, and there's an offline AI tool that can group visually similar images.
+It works for pretty much any kind of content: artwork, photo sets, videos, audio, and text posts. Downloads run in parallel, rate limits are handled for you, anything that fails gets retried at the end, and there's an offline tool that can group visually similar images.
 
 ---
 
@@ -33,7 +33,7 @@ It works for pretty much any kind of content: artwork, photo sets, videos, audio
   - Skip files by keyword or by minimum file size (for example, skip anything under a certain number of MB).
   - Clean up filenames by stripping out tags or keywords you don't want.
 - **Cloud link extraction**: Finds external download links (Mega, Google Drive, Dropbox, Gofile) in post descriptions. You can export the URLs or download from them directly.
-- **Local AI visual grouping**: Uses ONNX Runtime embeddings to cluster duplicate images, burst shots, and similar artwork. Everything runs on your machine.
+- **Local visual grouping**: Uses ONNX Runtime embeddings to cluster duplicate images, burst shots, and similar artwork. Everything runs on your machine.
 - **Favorites sync**: Import your session cookie to pull in your favorited creators and bookmarked posts.
 
 ---
@@ -49,7 +49,7 @@ Everything lives in a sidebar with these tabs:
 | **Creators** | Creators Directory | Browse and search creators across services (Patreon, Fanbox, Fantia, Subscribestar, Boosty, etc.) and start downloads from there. |
 | **Posts** | Posts Feed | Search individual posts with thumbnail previews, filter by publish date, and download one or a batch. |
 | **Auto-Sync** | Auto-Sync | Runs in the background, checks your subscribed creators for new posts every so often, and archives them automatically. |
-| **Visual Sort** | AI Visual Sort | Groups similar images (burst shots, duplicates, variations) using on-device embeddings. No cloud APIs involved. |
+| **Visual Sort** | Visual Sort | Groups similar images (burst shots, duplicates, variations) using on-device embeddings. No cloud APIs involved. |
 | **Favorites** | Bookmarks Sync | Connects to your Pawchive account with a session cookie so you can sync bookmarked creators and saved posts. |
 | **About** | User Guide | Built-in docs: URL formats, troubleshooting tips, keyboard shortcuts, and version info. |
 | **Support** | Community & Donate | Links to the issue tracker, community channels, and ways to support the developer (Ko-fi, Patreon, Buy Me a Coffee). |
