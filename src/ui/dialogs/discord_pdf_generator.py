@@ -3,7 +3,10 @@ import re
 import datetime
 import time
 try:
-    from fpdf import FPDF
+    try:
+        from fpdf import FPDF
+    except ImportError:
+        from fpdf2 import FPDF
     FPDF_AVAILABLE = True
 
     class PDF(FPDF):
@@ -65,12 +68,50 @@ def create_pdf_from_discord_messages(messages_data, server_name, channel_name, o
         if not os.path.exists(font_path) or not os.path.exists(bold_font_path):
             raise RuntimeError("Font files not found")
         
-        pdf.add_font('DejaVu', '', font_path, uni=True)
-        pdf.add_font('DejaVu', 'B', bold_font_path, uni=True)
+        try:
+            pdf.add_font('DejaVu', '', font_path)
+            pdf.add_font('DejaVu', 'B', bold_font_path)
+        except TypeError:
+            pdf.add_font('DejaVu', '', font_path, uni=True)
+            pdf.add_font('DejaVu', 'B', bold_font_path, uni=True)
     except Exception as font_error:
         logger(f"   ⚠️ Could not load DejaVu font: {font_error}. Falling back to Arial.")
         default_font_family = 'Arial'
         pdf.default_font_family = 'Arial'
+
+    # Register CJK (Chinese, Japanese, Korean) and symbol fallback fonts
+    if hasattr(pdf, 'set_fallback_fonts'):
+        cjk_candidates = []
+        windir = os.environ.get('WINDIR', 'C:\\Windows')
+        win_fonts = os.path.join(windir, 'Fonts')
+        if os.path.isdir(win_fonts):
+            cjk_candidates.extend([
+                ('MSYaHei', os.path.join(win_fonts, 'msyh.ttc'), os.path.join(win_fonts, 'msyhbd.ttc')),
+                ('Malgun', os.path.join(win_fonts, 'malgun.ttf'), os.path.join(win_fonts, 'malgunbd.ttf')),
+                ('MSGothic', os.path.join(win_fonts, 'msgothic.ttc'), None),
+                ('SimSun', os.path.join(win_fonts, 'simsun.ttc'), None),
+                ('YuGothic', os.path.join(win_fonts, 'YuGothR.ttc'), os.path.join(win_fonts, 'YuGothB.ttc')),
+                ('Meiryo', os.path.join(win_fonts, 'meiryo.ttc'), os.path.join(win_fonts, 'meiryob.ttc')),
+                ('SegoeUISym', os.path.join(win_fonts, 'seguisym.ttf'), None),
+            ])
+        fallback_names = []
+        for font_alias, regular_path, bold_path in cjk_candidates:
+            if regular_path and os.path.exists(regular_path):
+                try:
+                    pdf.add_font(font_alias, '', regular_path)
+                    if bold_path and os.path.exists(bold_path):
+                        try:
+                            pdf.add_font(font_alias, 'B', bold_path)
+                        except Exception:
+                            pass
+                    fallback_names.append(font_alias)
+                except Exception:
+                    pass
+        if fallback_names:
+            try:
+                pdf.set_fallback_fonts(fallback_names, exact_match=False)
+            except Exception as fb_err:
+                logger(f"   ⚠️ Could not set CJK fallback fonts: {fb_err}")
     
     pdf.add_page()
     pdf.set_font(default_font_family, 'B', 24)

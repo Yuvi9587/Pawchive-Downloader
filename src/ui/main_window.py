@@ -52,6 +52,7 @@ from ..core.manager import DownloadManager
 from ..core.platform_database import PlatformDatabaseManager
 from .dialogs.ExportLinksDialog import ExportLinksDialog
 from .dialogs.MoreOptionsDialog import MoreOptionsDialog
+from .dialogs.SinglePDF import create_single_pdf_from_content, create_individual_pdf
 from ..core.auto_sync_manager import AutoSyncManager
 from .assets import get_app_icon_object
 from ..config.constants import *
@@ -69,7 +70,6 @@ from .dialogs.DownloadHistoryDialog import DownloadHistoryDialog
 from ..services.updater import UpdateChecker, UpdateDownloader, PatchUpdateChecker
 from .dialogs.DownloadExtractedLinksDialog import DownloadExtractedLinksDialog
 from .dialogs.ConfirmAddAllDialog import ConfirmAddAllDialog
-from .dialogs.MoreOptionsDialog import MoreOptionsDialog
 from .dialogs.discord_pdf_generator import create_pdf_from_discord_messages
 from .dialogs.KeepDuplicatesDialog import KeepDuplicatesDialog
 from .dialogs.MultipartScopeDialog import MultipartScopeDialog
@@ -2966,9 +2966,15 @@ class DownloaderApp (QWidget ):
             return 
 
         if message.startswith("TEMP_FILE_PATH:"):
-            filepath = message.split(":", 1)[1]
+            filepath = message.split(":", 1)[1].strip()
             if self.single_pdf_setting:
                 self.session_temp_files.append(filepath)
+                try:
+                    with open(filepath, 'r', encoding='utf-8') as f:
+                        post_content_data = json.load(f)
+                        self.temp_pdf_content_list.append(post_content_data)
+                except Exception as e:
+                    self.log_signal.emit(f"⚠️ Error reading temp file for PDF aggregation: {e}")
             return
             
         is_html_message = message.startswith(HTML_PREFIX)
@@ -3365,8 +3371,6 @@ class DownloaderApp (QWidget ):
 
         is_in_checkbox_mode = getattr(self, 'combined_download_pdf_setting', False) or (hasattr(self, 'checkbox_more') and not self.checkbox_more.isHidden())
         if button != self.radio_more and checked and not is_in_checkbox_mode:
-            self.more_filter_scope = None
-            self.single_pdf_setting = False
             if hasattr(self, 'use_subfolders_checkbox'):
                 self.use_subfolders_checkbox.setEnabled(True)
 
@@ -3854,6 +3858,8 @@ class DownloaderApp (QWidget ):
                 self.radio_more.setChecked(True)
                 fmt = (self.text_export_format or 'pdf').upper()
                 scope_text = "Comments" if self.more_filter_scope == MoreOptionsDialog.SCOPE_COMMENTS else "Description"
+                suffix = "Single PDF" if (self.single_pdf_setting and fmt == "PDF") else fmt
+                self.radio_more.setText(f"More ({suffix})")
 
     def open_more_options_dialog(self):
         """
@@ -3955,10 +3961,6 @@ class DownloaderApp (QWidget ):
         if button != self.radio_more and checked:
             is_in_checkbox_mode = getattr(self, 'combined_download_pdf_setting', False) or (hasattr(self, 'checkbox_more') and not self.checkbox_more.isHidden())
             if not is_in_checkbox_mode:
-                self.more_filter_scope = None
-                self.single_pdf_setting = False
-                self.add_info_in_pdf_setting = False
-
                 if hasattr(self, 'use_multithreading_checkbox'):
                     self.use_multithreading_checkbox.setEnabled(True)
                     self._update_multithreading_for_date_mode()
@@ -5483,7 +5485,7 @@ class DownloaderApp (QWidget ):
             'combined_download_pdf': is_combined_mode,
             'text_only_scope': text_only_scope_for_run,
             'text_export_format': export_format_for_run,
-            'single_pdf_mode': (self.single_pdf_setting and not is_combined_mode) and not getattr(self, 'is_export_all_links_session', False),
+            'single_pdf_mode': (self.single_pdf_setting and backend_filter_mode == 'text_only' and not is_combined_mode) and not getattr(self, 'is_export_all_links_session', False),
             'skip_zip': effective_skip_zip,
             'use_subfolders': use_subfolders,
             'use_post_subfolders': use_post_subfolders,
@@ -6500,7 +6502,18 @@ class DownloaderApp (QWidget ):
         """
         Sorts the temporary data chronologically and starts the background PDF generator thread.
         """
+        if not self.temp_pdf_content_list and self.session_temp_files:
+            for tf in self.session_temp_files:
+                if os.path.exists(tf):
+                    try:
+                        with open(tf, 'r', encoding='utf-8') as f:
+                            self.temp_pdf_content_list.append(json.load(f))
+                    except Exception as e:
+                        self.log_signal.emit(f"⚠️ Error reading temp file for PDF aggregation: {e}")
+
         if not self.temp_pdf_content_list:
+            self.log_signal.emit("ℹ️ No text content found across matching posts to compile into a single PDF.")
+            self._cleanup_temp_files()
             return
 
         self.log_signal.emit("   Sorting collected content for PDF...")
@@ -6523,6 +6536,7 @@ class DownloaderApp (QWidget ):
             base_dir = self.dir_input.text().strip()
         if not base_dir:
              base_dir = self.app_base_dir
+        os.makedirs(base_dir, exist_ok=True)
              
         output_path = os.path.join(base_dir, filename)
 
@@ -6555,6 +6569,7 @@ class DownloaderApp (QWidget ):
             QMessageBox.warning(self, "PDF Error", f"Could not create PDF: {message}")
         
         self.temp_pdf_content_list = []
+        self._cleanup_temp_files()
 
     def _add_to_history_candidates(self, history_data):
         """Adds processed post data to the history candidates list and updates the creator profile."""        
@@ -7039,7 +7054,6 @@ class DownloaderApp (QWidget ):
                     self.thread_pool.shutdown(wait=False)
                     self.thread_pool = None
                 self._cleanup_temp_files()
-                self.single_pdf_setting = False
 
                 try:
                     if os.path.exists(self.current_job_file):
@@ -7073,14 +7087,14 @@ class DownloaderApp (QWidget ):
                 self.thread_pool.shutdown(wait=False) 
                 self.thread_pool = None
 
-            if self.single_pdf_setting and self.session_temp_files:
+            if self.single_pdf_setting and self.get_filter_mode() == 'text_only' and (self.session_temp_files or self.temp_pdf_content_list):
                 try:
                     self._trigger_single_pdf_creation()
-                finally:
+                except Exception as e:
+                    self.log_signal.emit(f"❌ Failed to trigger single PDF creation: {e}")
                     self._cleanup_temp_files()
             else:
                 self._cleanup_temp_files()
-                self.single_pdf_setting = False
 
             if kept_original_names_list is None:
                 kept_original_names_list = list(self.all_kept_original_filenames) if hasattr(self, 'all_kept_original_filenames') else []

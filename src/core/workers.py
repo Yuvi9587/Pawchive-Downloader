@@ -33,7 +33,10 @@ try:
 except ImportError:
     Image = None
 try:
-    from fpdf import FPDF
+    try:
+        from fpdf import FPDF
+    except ImportError:
+        from fpdf2 import FPDF
     class PDF(FPDF):
         def header(self):
             pass
@@ -42,7 +45,7 @@ try:
             self.set_font('Arial', 'I', 8)
             self.cell(0, 10, 'Page %s' % self.page_no(), 0, 0, 'C')
 
-except ImportError:
+except (ImportError, Exception):
     FPDF = None
 
 try:
@@ -2028,7 +2031,7 @@ class PostProcessorWorker:
                     parsed_url = urlparse(self.api_url_input)
                     api_domain = parsed_url.netloc
                     cookies = prepare_cookies_for_request(self.use_cookie, self.cookie_text, self.selected_cookie_file, self.app_base_dir, lambda msg: None, target_domain=api_domain)
-                    full_data = fetch_single_post_data(api_domain, self.service, self.user_id, post_id, headers, self.logger, cookies_dict=cookies)
+                    full_data = fetch_single_post_data(api_domain, self.service, self.user_id, post_id, headers, self.logger, cookies_dict=cookies, proxies=self.proxies)
                     if full_data:
                         final_post_data = full_data
                 
@@ -2109,7 +2112,8 @@ class PostProcessorWorker:
                         common_content_data['content'] = cleaned_text
                         common_content_data['content_text_for_pdf'] = cleaned_text
 
-                    temp_dir = os.path.join(self.app_base_dir, "appdata")
+                    base_dir = self.app_base_dir or get_app_base_path() or os.getcwd()
+                    temp_dir = os.path.join(base_dir, "appdata")
                     os.makedirs(temp_dir, exist_ok=True)
                     temp_filename = f"tmp_{post_id}_{uuid.uuid4().hex[:8]}.json"
                     temp_filepath = os.path.join(temp_dir, temp_filename)

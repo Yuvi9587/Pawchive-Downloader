@@ -3,7 +3,10 @@ import re
 import sys 
 
 try:
-    from fpdf import FPDF
+    try:
+        from fpdf import FPDF
+    except ImportError:
+        from fpdf2 import FPDF
     FPDF_AVAILABLE = True
 
     class PDF(FPDF):
@@ -21,8 +24,6 @@ try:
             self.cell(0, 10, 'Page ' + str(self.page_no()), 0, 0, 'C')
 
 except Exception as e:
-    print(f"\n❌ DEBUG INFO: Import failed. The specific error is: {e}")
-    print(f"❌ DEBUG INFO: Python running this script is located at: {sys.executable}\n")
     FPDF_AVAILABLE = False
     FPDF = None 
     PDF = None
@@ -68,7 +69,7 @@ def write_text_with_links(pdf, text, font_family, font_size=12, line_height=7):
             pdf.ln(line_height * 2)
 
 def _setup_pdf_fonts(pdf, font_path, logger=print):
-    """Helper to setup fonts for the PDF instance."""
+    """Helper to setup DejaVu and CJK/multilingual fallback fonts for the PDF instance."""
     bold_font_path = ""
     default_font = 'Arial'
     
@@ -77,17 +78,87 @@ def _setup_pdf_fonts(pdf, font_path, logger=print):
 
     try:
         if font_path and os.path.exists(font_path): 
-            pdf.add_font('DejaVu', '', font_path, uni=True)
+            try:
+                pdf.add_font('DejaVu', '', font_path)
+            except TypeError:
+                pdf.add_font('DejaVu', '', font_path, uni=True)
             default_font = 'DejaVu'
             if os.path.exists(bold_font_path): 
-                pdf.add_font('DejaVu', 'B', bold_font_path, uni=True)
+                try:
+                    pdf.add_font('DejaVu', 'B', bold_font_path)
+                except TypeError:
+                    pdf.add_font('DejaVu', 'B', bold_font_path, uni=True)
             else:
-                pdf.add_font('DejaVu', 'B', font_path, uni=True)
+                try:
+                    pdf.add_font('DejaVu', 'B', font_path)
+                except TypeError:
+                    pdf.add_font('DejaVu', 'B', font_path, uni=True)
     except Exception as font_error:
         logger(f"   ⚠️ Could not load DejaVu font: {font_error}. Falling back to Arial.")
         default_font = 'Arial'
     
     pdf.font_family_main = default_font
+
+    # Register CJK (Chinese, Japanese, Korean) and symbol fallback fonts
+    if hasattr(pdf, 'set_fallback_fonts'):
+        cjk_candidates = []
+        
+        # 1. Windows system fonts
+        windir = os.environ.get('WINDIR', 'C:\\Windows')
+        win_fonts = os.path.join(windir, 'Fonts')
+        if os.path.isdir(win_fonts):
+            cjk_candidates.extend([
+                ('MSYaHei', os.path.join(win_fonts, 'msyh.ttc'), os.path.join(win_fonts, 'msyhbd.ttc')),
+                ('Malgun', os.path.join(win_fonts, 'malgun.ttf'), os.path.join(win_fonts, 'malgunbd.ttf')),
+                ('MSGothic', os.path.join(win_fonts, 'msgothic.ttc'), None),
+                ('SimSun', os.path.join(win_fonts, 'simsun.ttc'), None),
+                ('YuGothic', os.path.join(win_fonts, 'YuGothR.ttc'), os.path.join(win_fonts, 'YuGothB.ttc')),
+                ('Meiryo', os.path.join(win_fonts, 'meiryo.ttc'), os.path.join(win_fonts, 'meiryob.ttc')),
+                ('SegoeUISym', os.path.join(win_fonts, 'seguisym.ttf'), None),
+            ])
+            
+        # 2. Linux fonts
+        linux_font_dirs = [
+            '/usr/share/fonts/opentype/noto',
+            '/usr/share/fonts/truetype/noto',
+            '/usr/share/fonts/truetype/wqy',
+            '/usr/share/fonts/truetype/droid',
+        ]
+        for ldir in linux_font_dirs:
+            if os.path.isdir(ldir):
+                try:
+                    for f in os.listdir(ldir):
+                        if any(x in f.lower() for x in ['cjk', 'microhei', 'zenhei', 'fallback']):
+                            fpath = os.path.join(ldir, f)
+                            cjk_candidates.append((f"LinuxCJK_{len(cjk_candidates)}", fpath, None))
+                except Exception:
+                    pass
+                        
+        # 3. macOS fonts
+        for mac_font in ['/System/Library/Fonts/PingFang.ttc', '/System/Library/Fonts/STHeiti Light.ttc', '/Library/Fonts/Arial Unicode.ttf']:
+            if os.path.exists(mac_font):
+                cjk_candidates.append(('MacCJK', mac_font, None))
+
+        fallback_names = []
+        for font_alias, regular_path, bold_path in cjk_candidates:
+            if regular_path and os.path.exists(regular_path):
+                try:
+                    pdf.add_font(font_alias, '', regular_path)
+                    if bold_path and os.path.exists(bold_path):
+                        try:
+                            pdf.add_font(font_alias, 'B', bold_path)
+                        except Exception:
+                            pass
+                    fallback_names.append(font_alias)
+                except Exception:
+                    pass
+
+        if fallback_names:
+            try:
+                pdf.set_fallback_fonts(fallback_names, exact_match=False)
+            except Exception as fb_err:
+                logger(f"   ⚠️ Could not set CJK fallback fonts: {fb_err}")
+
     return default_font
 
 def add_metadata_page(pdf, post, font_family):
