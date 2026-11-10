@@ -56,8 +56,10 @@ from .dialogs.SinglePDF import create_single_pdf_from_content, create_individual
 from ..core.auto_sync_manager import AutoSyncManager
 from .assets import get_app_icon_object
 from ..config.constants import *
-from ..utils.file_utils import KNOWN_NAMES, clean_folder_name, get_app_base_path
+from ..utils.file_utils import KNOWN_NAMES, clean_folder_name, clean_filename, get_app_base_path
 from ..utils.network_utils import extract_post_info, prepare_cookies_for_request, get_link_platform
+from ..core.direct_download import DirectFileDownloadThread, is_direct_file_url
+from ..core.cache_manager import CachePruneWorker, format_size_str
 from ..utils.resolution import setup_ui, get_dark_theme, get_dark_theme as get_theme_stylesheet
 from ..utils.command import parse_commands_from_text
 from ..i18n.translator import get_translation
@@ -387,6 +389,34 @@ class DownloaderApp (QWidget ):
         self._check_for_interrupted_session()
         self._cleanup_after_update() 
         self._check_for_patch_update()
+        QTimer.singleShot(4000, self._check_and_prune_cache_on_startup)
+
+    def _check_and_prune_cache_on_startup(self):
+        """Checks cache size on startup and evicts oldest preview files if exceeding limit."""
+        try:
+            auto_clean = self.settings.value(AUTO_CLEAN_CACHE_KEY, True, type=bool)
+            if not auto_clean:
+                return
+            limit_mb = self.settings.value(CACHE_SIZE_LIMIT_MB_KEY, 1024, type=int)
+            if limit_mb <= 0:
+                return
+
+            def _on_prune_finished(freed_bytes, count):
+                if freed_bytes > 0:
+                    self.log_signal.emit(
+                        f"🧹 Cache auto-cleaned: Freed {format_size_str(freed_bytes)} across {count:,} old preview files to stay under {limit_mb} MB limit."
+                    )
+
+            self._startup_cache_worker = CachePruneWorker(
+                action="prune",
+                app_base_dir=self.app_base_dir,
+                max_size_mb=limit_mb,
+                parent=self
+            )
+            self._startup_cache_worker.finished.connect(_on_prune_finished)
+            self._startup_cache_worker.start()
+        except Exception:
+            pass
 
     def _check_for_patch_update(self):
         current_version = self.windowTitle().split(' v')[-1]
@@ -4917,7 +4947,62 @@ class DownloaderApp (QWidget ):
             return True
 
         self.cancellation_message_logged_this_session = False
-        
+
+        if item_type_from_queue == 'direct_file' or is_direct_file_url(api_url):
+            self.log_signal.emit(f"🚀 Direct media file download detected: '{api_url}'")
+            target_folder = effective_output_dir_for_run or self.dir_input.text().strip() or os.path.expanduser("~/Downloads")
+
+            cname = getattr(self, 'last_known_creator_name', None) or "Creator"
+            should_create_artist_folder = (
+                self.favorite_download_scope == FAVORITE_SCOPE_ARTIST_FOLDERS
+                if hasattr(self, 'favorite_download_scope') else True
+            )
+            if should_create_artist_folder and cname:
+                target_folder = os.path.join(target_folder, clean_folder_name(cname))
+
+            post_title = getattr(self, 'last_known_post_title', '') or ""
+            use_post_subfolders = getattr(self, 'use_subfolder_per_post_checkbox', None) and self.use_subfolder_per_post_checkbox.isChecked()
+            if use_post_subfolders and post_title:
+                target_folder = os.path.join(target_folder, clean_folder_name(post_title))
+
+            os.makedirs(target_folder, exist_ok=True)
+
+            cookies = None
+            if hasattr(self, 'use_cookie_checkbox') and self.use_cookie_checkbox.isChecked():
+                cookies = prepare_cookies_for_request(
+                    use_cookie_flag=True,
+                    cookie_text_input=self.cookie_text_input.text() if hasattr(self, 'cookie_text_input') else "",
+                    selected_cookie_file_path=getattr(self, 'selected_cookie_filepath', None),
+                    app_base_dir=self.app_base_dir,
+                    logger_func=self.handle_main_log
+                )
+
+            if self.cancellation_event.is_set():
+                self.cancellation_event.clear()
+            self.is_finishing = False
+            self.is_main_download_active = True
+
+            self.download_thread = DirectFileDownloadThread(
+                url=api_url,
+                output_dir=target_folder,
+                pause_event=self.pause_event,
+                cancellation_event=self.cancellation_event,
+                cookies=cookies,
+                proxies=getattr(self, 'proxies', None),
+                parent=self
+            )
+            self.download_thread.progress_signal.connect(self.handle_main_log)
+            self.download_thread.file_progress_signal.connect(self.update_file_progress_display)
+            self.download_thread.overall_progress_signal.connect(
+                lambda total, processed: self.update_progress_display(total, processed, unit="files")
+            )
+            self.download_thread.finished_signal.connect(
+                lambda dl, skip, cancelled, names: self.download_finished(dl, skip, cancelled, names)
+            )
+            self.download_thread.start()
+            self._update_button_states_and_connections()
+            return True
+
         service, id1, id2 = extract_post_info(api_url)
         if id1:
             resolved_creator = self.resolve_creator_name(service, id1)
@@ -7232,6 +7317,7 @@ class DownloaderApp (QWidget ):
                     QTimer.singleShot(2000, self.auto_sync_manager.run_sync_cycle)
         
         finally:
+            self.is_finishing = False
             if lock_held:
                 self.finish_lock.release()
 
@@ -8361,6 +8447,68 @@ class DownloaderApp (QWidget ):
 
         item_type = self.current_processing_favorite_item_info.get('type', 'artist')
         self.log_signal.emit(f"▶️ Processing next favorite from queue ({item_type}): '{item_display_name}' ({next_url})")
+
+        if item_type == 'direct_file' or is_direct_file_url(next_url):
+            self.log_signal.emit("   (Direct media file detected, using dedicated direct downloader)")
+            main_download_dir = self.dir_input.text().strip() or os.path.expanduser("~/Downloads")
+            target_folder = main_download_dir
+
+            cname = self.current_processing_favorite_item_info.get('name_for_folder')
+            if not cname:
+                cname = self.current_processing_favorite_item_info.get('creator_name')
+            if not cname:
+                cname = getattr(self, 'last_known_creator_name', None) or "Creator"
+
+            force_artist_folder = self.current_processing_favorite_item_info.get('force_artist_folder', True)
+            if force_artist_folder and cname:
+                target_folder = os.path.join(target_folder, clean_folder_name(cname))
+
+            post_title = self.current_processing_favorite_item_info.get('post_title') or ""
+            use_post_subfolders = getattr(self, 'use_subfolder_per_post_checkbox', None) and self.use_subfolder_per_post_checkbox.isChecked()
+            if use_post_subfolders and post_title:
+                target_folder = os.path.join(target_folder, clean_folder_name(post_title))
+
+            os.makedirs(target_folder, exist_ok=True)
+            filename = self.current_processing_favorite_item_info.get('filename')
+            fallback_urls = self.current_processing_favorite_item_info.get('fallback_urls') or []
+
+            cookies = None
+            if hasattr(self, 'use_cookie_checkbox') and self.use_cookie_checkbox.isChecked():
+                cookies = prepare_cookies_for_request(
+                    use_cookie_flag=True,
+                    cookie_text_input=self.cookie_text_input.text() if hasattr(self, 'cookie_text_input') else "",
+                    selected_cookie_file_path=getattr(self, 'selected_cookie_filepath', None),
+                    app_base_dir=self.app_base_dir,
+                    logger_func=self.handle_main_log
+                )
+
+            if self.cancellation_event.is_set():
+                self.cancellation_event.clear()
+            self.is_finishing = False
+            self.is_main_download_active = True
+
+            self.download_thread = DirectFileDownloadThread(
+                url=next_url,
+                output_dir=target_folder,
+                filename=filename,
+                pause_event=self.pause_event,
+                cancellation_event=self.cancellation_event,
+                cookies=cookies,
+                proxies=getattr(self, 'proxies', None),
+                fallback_urls=fallback_urls,
+                parent=self
+            )
+            self.download_thread.progress_signal.connect(self.handle_main_log)
+            self.download_thread.file_progress_signal.connect(self.update_file_progress_display)
+            self.download_thread.overall_progress_signal.connect(
+                lambda total, processed: self.update_progress_display(total, processed, unit="files")
+            )
+            self.download_thread.finished_signal.connect(
+                lambda dl, skip, cancelled, names: self.download_finished(dl, skip, cancelled, names)
+            )
+            self.download_thread.start()
+            self._update_button_states_and_connections()
+            return
 
         if 'fap-nation.com' in next_url or 'fap-nation.org' in next_url:
             self.log_signal.emit("   (Fap-Nation batch item detected, using dedicated thread)")

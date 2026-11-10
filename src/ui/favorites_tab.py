@@ -320,7 +320,7 @@ class FavoritesTabWidget(QWidget):
         header_bar.addLayout(title_col, 1)
 
         # Cookie Status indicator & Settings button
-        self.cookie_status_badge = QLabel("🍪 Checking cookies...")
+        self.cookie_status_badge = QLabel("Checking cookies...")
         self.cookie_status_badge.setStyleSheet(
             "font-size: 8pt; font-weight: bold; color: #9A9EAA; background-color: #2D3035; "
             "border: 1px solid #424652; border-radius: 4px; padding: 4px 8px;"
@@ -376,11 +376,11 @@ class FavoritesTabWidget(QWidget):
         # Add Sub-tabs
         self.artists_widget = QWidget()
         self._build_artists_subtab(self.artists_widget)
-        self.tabs.addTab(self.artists_widget, "🖼️ Favorite Artists")
+        self.tabs.addTab(self.artists_widget, QIcon(get_asset_path("assets/uisvg/image.svg")), "Favorite Artists")
 
         self.posts_widget = QWidget()
         self._build_posts_subtab(self.posts_widget)
-        self.tabs.addTab(self.posts_widget, "📄 Favorite Posts")
+        self.tabs.addTab(self.posts_widget, QIcon(get_asset_path("assets/uisvg/manga.svg")), "Favorite Posts")
 
         root_layout.addWidget(self.tabs, 1)
 
@@ -447,7 +447,8 @@ class FavoritesTabWidget(QWidget):
 
         tb.addStretch(1)
 
-        self.download_artists_btn = QPushButton("📥 Download Selected")
+        self.download_artists_btn = QPushButton("  Download Selected")
+        self.download_artists_btn.setIcon(QIcon(get_asset_path("assets/Svg/download.svg")))
         self.download_artists_btn.setFixedHeight(int(30 * scale))
         self.download_artists_btn.setEnabled(False)
         self.download_artists_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -579,7 +580,8 @@ class FavoritesTabWidget(QWidget):
 
         tb.addStretch(1)
 
-        self.download_posts_btn = QPushButton("📥 Download Selected")
+        self.download_posts_btn = QPushButton("  Download Selected")
+        self.download_posts_btn.setIcon(QIcon(get_asset_path("assets/Svg/download.svg")))
         self.download_posts_btn.setFixedHeight(int(30 * scale))
         self.download_posts_btn.setEnabled(False)
         self.download_posts_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -660,19 +662,19 @@ class FavoritesTabWidget(QWidget):
         has_file = bool(cfg['selected_cookie_file'] and os.path.exists(cfg['selected_cookie_file']))
 
         if use_cookie and (has_text or has_file):
-            self.cookie_status_badge.setText("🍪 Cookies: Active")
+            self.cookie_status_badge.setText("Cookies: Active")
             self.cookie_status_badge.setStyleSheet(
                 "font-size: 8pt; font-weight: bold; color: #6EE7B7; background-color: #064E3B; "
                 "border: 1px solid #059669; border-radius: 4px; padding: 4px 8px;"
             )
         elif use_cookie:
-            self.cookie_status_badge.setText("🍪 Cookies: Enabled (No cookie entered)")
+            self.cookie_status_badge.setText("Cookies: Enabled (No cookie entered)")
             self.cookie_status_badge.setStyleSheet(
                 "font-size: 8pt; font-weight: bold; color: #FDE68A; background-color: #78350F; "
                 "border: 1px solid #D97706; border-radius: 4px; padding: 4px 8px;"
             )
         else:
-            self.cookie_status_badge.setText("🍪 Cookies: Off (Required for Private Favorites)")
+            self.cookie_status_badge.setText("Cookies: Off (Required for Private Favorites)")
             self.cookie_status_badge.setStyleSheet(
                 "font-size: 8pt; font-weight: bold; color: #9CA3AF; background-color: #1F2937; "
                 "border: 1px solid #374151; border-radius: 4px; padding: 4px 8px;"
@@ -709,10 +711,10 @@ class FavoritesTabWidget(QWidget):
 
         if success and artists_list:
             self.all_artists = artists_list
-            self.artists_status_lbl.setText(f"✅ Found {len(self.all_artists)} favorite artist(s).")
+            self.artists_status_lbl.setText(f"Found {len(self.all_artists)} favorite artist(s).")
             self._filter_artists()
         else:
-            self.artists_status_lbl.setText(f"⚠️ {err_msg or 'No favorite artists found.'}")
+            self.artists_status_lbl.setText(f"{err_msg or 'No favorite artists found.'}")
             if not self.all_artists:
                 self.artists_list.clear()
             self._update_artists_count()
@@ -732,9 +734,10 @@ class FavoritesTabWidget(QWidget):
 
         for a in self.filtered_artists:
             item = QListWidgetItem()
+            item.setIcon(QIcon(get_asset_path("assets/uisvg/image.svg")))
             svc = a.get('service', 'N/A').capitalize()
             src = a.get('_source_api', '')
-            item.setText(f"🎨 {a['name']}   [{svc}]   ({src})")
+            item.setText(f"{a['name']}   [{svc}]   ({src})")
             item.setToolTip(f"URL: {a['url']}\nService: {svc}\nArtist ID: {a['id']}")
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(Qt.CheckState.Unchecked)
@@ -766,7 +769,7 @@ class FavoritesTabWidget(QWidget):
         )
         self.artists_count_lbl.setText(f"{total} artists • {selected} selected")
         self.download_artists_btn.setEnabled(selected > 0)
-        self.download_artists_btn.setText(f"📥 Download Selected ({selected})" if selected > 0 else "📥 Download Selected")
+        self.download_artists_btn.setText(f"  Download Selected ({selected})" if selected > 0 else "  Download Selected")
 
     def _download_selected_artists(self):
         selected_artists = []
@@ -782,7 +785,7 @@ class FavoritesTabWidget(QWidget):
             return
 
         if hasattr(self.parent_app, 'log_signal'):
-            self.parent_app.log_signal.emit(f"⭐ Queuing {len(selected_artists)} favorite artist(s) for download.")
+            self.parent_app.log_signal.emit(f"Queuing {len(selected_artists)} favorite artist(s) for download.")
 
         for a in selected_artists:
             self.parent_app.favorite_download_queue.append({
@@ -838,10 +841,10 @@ class FavoritesTabWidget(QWidget):
 
         if success and posts_list:
             self.all_posts = posts_list
-            self.posts_status_lbl.setText(f"✅ Found {len(self.all_posts)} favorite post(s).")
+            self.posts_status_lbl.setText(f"Found {len(self.all_posts)} favorite post(s).")
             self._filter_posts()
         else:
-            self.posts_status_lbl.setText(f"⚠️ {err_msg or 'No favorite posts found.'}")
+            self.posts_status_lbl.setText(f"{err_msg or 'No favorite posts found.'}")
             if not self.all_posts:
                 self.posts_list.clear()
             self._update_posts_count()
@@ -882,7 +885,8 @@ class FavoritesTabWidget(QWidget):
 
         for (svc, cid, cname), p_list in grouped.items():
             # Creator Header
-            hdr = QListWidgetItem(f"🎨 {cname}  [{svc.capitalize()} / {cid}]  ({len(p_list)} posts)")
+            hdr = QListWidgetItem(f"{cname}  [{svc.capitalize()} / {cid}]  ({len(p_list)} posts)")
+            hdr.setIcon(QIcon(get_asset_path("assets/Svg/user.svg")))
             hdr.setFlags(Qt.ItemFlag.NoItemFlags)
             font = hdr.font()
             font.setBold(True)
@@ -893,9 +897,10 @@ class FavoritesTabWidget(QWidget):
             # Posts under this creator
             for post_data in p_list:
                 it = QListWidgetItem()
+                it.setIcon(QIcon(get_asset_path("assets/uisvg/manga.svg")))
                 title = post_data.get('title', 'Untitled Post')
                 date_str = f" • {post_data['added_date'][:10]}" if post_data.get('added_date') else ""
-                it.setText(f"   📄 {title}{date_str}")
+                it.setText(f"{title}{date_str}")
                 it.setToolTip(f"Post ID: {post_data['post_id']}\nCreator: {cname}\nService: {svc}\nSource: {post_data.get('_source_api')}")
                 it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                 it.setCheckState(Qt.CheckState.Unchecked)
@@ -934,7 +939,7 @@ class FavoritesTabWidget(QWidget):
         )
         self.posts_count_lbl.setText(f"{total} posts • {selected} selected")
         self.download_posts_btn.setEnabled(selected > 0)
-        self.download_posts_btn.setText(f"📥 Download Selected ({selected})" if selected > 0 else "📥 Download Selected")
+        self.download_posts_btn.setText(f"  Download Selected ({selected})" if selected > 0 else "  Download Selected")
 
     def _download_selected_posts(self):
         selected_posts = []
@@ -950,7 +955,7 @@ class FavoritesTabWidget(QWidget):
             return
 
         if hasattr(self.parent_app, 'log_signal'):
-            self.parent_app.log_signal.emit(f"⭐ Queuing {len(selected_posts)} favorite post(s) for download.")
+            self.parent_app.log_signal.emit(f"Queuing {len(selected_posts)} favorite post(s) for download.")
 
         for post_data in selected_posts:
             domain = self.parent_app._get_domain_for_service(post_data['service'], post_data.get('_source_api'))

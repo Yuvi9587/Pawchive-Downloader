@@ -66,6 +66,9 @@ DISCORD_TOKEN_KEY = "discord/token"
 CREATE_DATABASE_KEY = "createDatabaseV1"
 CREATE_POSTID_KEY = "createPostIdFilesV1"
 
+CACHE_SIZE_LIMIT_MB_KEY = "cacheSizeLimitMbV1"
+AUTO_CLEAN_CACHE_KEY = "autoCleanCacheOnStartupV1"
+
 POST_DOWNLOAD_ACTION_KEY = "postDownloadAction"
 
 

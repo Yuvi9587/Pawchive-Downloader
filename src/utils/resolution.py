@@ -863,6 +863,13 @@ def setup_ui(main_app):
         else:
             index = target
 
+        old_index = main_app.content_stack.currentIndex()
+        if old_index != index:
+            if old_index == 2 and hasattr(main_app, 'creators_tab'):
+                main_app.creators_tab.on_tab_deactivated()
+            elif old_index == 3 and hasattr(main_app, 'posts_tab'):
+                main_app.posts_tab.on_tab_deactivated()
+
         main_app.content_stack.setCurrentIndex(index)
         nav_buttons = [
             (main_app.nav_dl, 0),
@@ -881,6 +888,10 @@ def setup_ui(main_app):
 
         if index == 1 and hasattr(main_app, 'queue_tab'):
             main_app.queue_tab.on_tab_activated()
+        elif index == 2 and hasattr(main_app, 'creators_tab'):
+            main_app.creators_tab.on_tab_activated()
+        elif index == 3 and hasattr(main_app, 'posts_tab'):
+            main_app.posts_tab.on_tab_activated()
         elif index == 4 and hasattr(main_app, 'sync_tab'):
             main_app.sync_tab.on_tab_activated()
         elif index == 5 and hasattr(main_app, 'visual_sort_tab'):

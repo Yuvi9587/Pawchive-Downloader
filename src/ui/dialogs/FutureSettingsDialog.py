@@ -23,8 +23,9 @@ from ...config.constants import (
     FETCH_FIRST_KEY, DISCORD_TOKEN_KEY, POST_DOWNLOAD_ACTION_KEY,
     PROXY_ENABLED_KEY, PROXY_HOST_KEY, PROXY_PORT_KEY, 
     PROXY_USERNAME_KEY, PROXY_PASSWORD_KEY, CREATE_DATABASE_KEY,
-    CREATE_POSTID_KEY
+    CREATE_POSTID_KEY, CACHE_SIZE_LIMIT_MB_KEY, AUTO_CLEAN_CACHE_KEY
 )
+from ...core.cache_manager import CachePruneWorker, format_size_str
 from ...services.updater import UpdateChecker, UpdateDownloader, PatchDownloader
 
 class CountdownMessageBox(QDialog):
@@ -238,6 +239,34 @@ class FutureSettingsDialog(QDialog):
         self.save_settings_button.clicked.connect(self._handle_save_settings)
 
         downloads_tab_layout.addWidget(self.download_settings_group_box)
+
+        # ── Cache & Storage Management Group ──
+        self.cache_settings_group_box = QGroupBox()
+        cache_layout = QGridLayout(self.cache_settings_group_box)
+        cache_layout.setSpacing(10)
+
+        self.cache_size_label = QLabel()
+        self.clear_cache_button = QPushButton()
+        self.clear_cache_button.clicked.connect(self._handle_clear_cache)
+        cache_layout.addWidget(self.cache_size_label, 0, 0)
+        cache_layout.addWidget(self.clear_cache_button, 0, 1)
+
+        self.cache_limit_label = QLabel()
+        self.cache_limit_combo = QComboBox()
+        self.cache_limit_combo.addItem("500 MB", 512)
+        self.cache_limit_combo.addItem("1 GB (Recommended)", 1024)
+        self.cache_limit_combo.addItem("2 GB", 2048)
+        self.cache_limit_combo.addItem("5 GB", 5120)
+        self.cache_limit_combo.addItem("Unlimited", 0)
+        self.cache_limit_combo.currentIndexChanged.connect(self._cache_limit_setting_changed)
+        cache_layout.addWidget(self.cache_limit_label, 1, 0)
+        cache_layout.addWidget(self.cache_limit_combo, 1, 1)
+
+        self.auto_clean_cache_checkbox = QCheckBox()
+        self.auto_clean_cache_checkbox.stateChanged.connect(self._auto_clean_cache_setting_changed)
+        cache_layout.addWidget(self.auto_clean_cache_checkbox, 2, 0, 1, 2)
+
+        downloads_tab_layout.addWidget(self.cache_settings_group_box)
         downloads_tab_layout.addStretch(1) 
 
         network_tab_layout = QVBoxLayout(self.network_tab)
@@ -376,6 +405,21 @@ class FutureSettingsDialog(QDialog):
         self.load_settings_button.setToolTip(self._tr("load_settings_tooltip", "Load all download settings from a .json file."))
         self.save_settings_button.setText(self._tr("save_settings_button", "Save Settings..."))
         self.save_settings_button.setToolTip(self._tr("save_settings_tooltip", "Save all current download settings to a .json file."))
+
+        self.cache_settings_group_box.setTitle(self._tr("cache_settings_group_title", "Cache & Storage Management"))
+        self.cache_limit_label.setText(self._tr("cache_limit_label", "Max Cache Size Limit:"))
+        self.auto_clean_cache_checkbox.setText(self._tr("auto_clean_cache_label", "Auto-clean cache on startup (evicts oldest files when exceeding limit)"))
+        self.auto_clean_cache_checkbox.setToolTip(self._tr(
+            "auto_clean_cache_tooltip",
+            "When enabled, the app checks the preview cache size on startup and deletes\n"
+            "the oldest preview media/thumbnails if the total size exceeds the maximum limit."
+        ))
+        self.clear_cache_button.setText(self._tr("clear_cache_button_label", "🗑️ Clear Cache Now"))
+        self.clear_cache_button.setToolTip(self._tr(
+            "clear_cache_button_tooltip",
+            "Instantly clears cached HD images, preview thumbnails, and comments.\n"
+            "This will safely free up disk space without affecting your downloaded files."
+        ))
         
         self.proxy_group_box.setTitle(self._tr("proxy_settings_group_title", "Proxy Configuration"))
         self.proxy_enabled_checkbox.setText(self._tr("proxy_enabled_label", "Enable Proxy"))
@@ -398,6 +442,7 @@ class FutureSettingsDialog(QDialog):
         self._populate_post_download_action_combo()
         self._load_date_prefix_format()
         self._load_checkbox_states()
+        self._load_cache_settings()
 
     def _load_proxy_settings(self):
         """Loads proxy settings from QSettings into the UI."""
@@ -549,6 +594,84 @@ class FutureSettingsDialog(QDialog):
         self.parent_app.settings.sync()
         if hasattr(self.parent_app, 'create_postid_files'):
             self.parent_app.create_postid_files = is_checked
+
+    def _load_cache_settings(self):
+        """Loads cache settings and calculates current cache size asynchronously."""
+        limit_mb = self.parent_app.settings.value(CACHE_SIZE_LIMIT_MB_KEY, 1024, type=int)
+        self.cache_limit_combo.blockSignals(True)
+        idx = self.cache_limit_combo.findData(limit_mb)
+        if idx >= 0:
+            self.cache_limit_combo.setCurrentIndex(idx)
+        else:
+            self.cache_limit_combo.setCurrentIndex(1)
+        self.cache_limit_combo.blockSignals(False)
+
+        auto_clean = self.parent_app.settings.value(AUTO_CLEAN_CACHE_KEY, True, type=bool)
+        self.auto_clean_cache_checkbox.blockSignals(True)
+        self.auto_clean_cache_checkbox.setChecked(auto_clean)
+        self.auto_clean_cache_checkbox.blockSignals(False)
+
+        self._refresh_cache_size_display()
+
+    def _refresh_cache_size_display(self):
+        self.cache_size_label.setText(self._tr("cache_size_calculating", "Current Cache Size: Calculating..."))
+        base_dir = getattr(self.parent_app, "app_base_dir", None)
+        self._cache_info_worker = CachePruneWorker(action="info", app_base_dir=base_dir, parent=self)
+        self._cache_info_worker.info_ready.connect(self._on_cache_info_ready)
+        self._cache_info_worker.start()
+
+    def _on_cache_info_ready(self, info: dict):
+        formatted = info.get("formatted", "0 B")
+        files = info.get("total_files", 0)
+        self.cache_size_label.setText(
+            self._tr("current_cache_size_text", f"Current Cache Size: {formatted} ({files:,} files)")
+        )
+
+    def _cache_limit_setting_changed(self):
+        val = self.cache_limit_combo.currentData()
+        if val is not None:
+            self.parent_app.settings.setValue(CACHE_SIZE_LIMIT_MB_KEY, val)
+            self.parent_app.settings.sync()
+
+    def _auto_clean_cache_setting_changed(self, state):
+        is_checked = self.auto_clean_cache_checkbox.isChecked()
+        self.parent_app.settings.setValue(AUTO_CLEAN_CACHE_KEY, is_checked)
+        self.parent_app.settings.sync()
+
+    def _handle_clear_cache(self):
+        reply = QMessageBox.question(
+            self,
+            self._tr("clear_cache_confirm_title", "Clear Cache?"),
+            self._tr(
+                "clear_cache_confirm_text",
+                "Are you sure you want to clear all cached previews and thumbnails?\n\n"
+                "This will safely free up disk space. Downloaded files in your download folder will NOT be deleted."
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self.clear_cache_button.setEnabled(False)
+            self.cache_size_label.setText(self._tr("cache_clearing", "Clearing cache..."))
+            base_dir = getattr(self.parent_app, "app_base_dir", None)
+            self._clear_cache_worker = CachePruneWorker(action="clear", app_base_dir=base_dir, parent=self)
+            self._clear_cache_worker.finished.connect(self._on_cache_cleared)
+            self._clear_cache_worker.start()
+
+    def _on_cache_cleared(self, freed_bytes: int, count: int):
+        self.clear_cache_button.setEnabled(True)
+        freed_str = format_size_str(freed_bytes)
+        self.cache_size_label.setText(
+            self._tr("current_cache_size_text", "Current Cache Size: 0 B (0 files)")
+        )
+        QMessageBox.information(
+            self,
+            self._tr("cache_cleared_title", "Cache Cleared"),
+            self._tr(
+                "cache_cleared_message",
+                f"Preview cache successfully cleared!\nFreed {freed_str} across {count:,} temporary files."
+            )
+        )
 
     def _tr(self, key, default_text=""):
         if callable(get_translation) and self.parent_app:
