@@ -6,22 +6,24 @@ import sys
 import time
 import cloudscraper
 from collections import defaultdict
+from datetime import datetime
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QListWidget, QListWidgetItem, QProgressBar, QTabWidget, QFrame,
-    QMessageBox, QComboBox, QCheckBox, QApplication
+    QMessageBox, QComboBox, QCheckBox, QApplication, QMenu, QInputDialog
 )
-from PySide6.QtCore import Qt, QSize, QThread, Signal, QCoreApplication
-from PySide6.QtGui import QIcon, QFont
+from PySide6.QtCore import Qt, QSize, QThread, Signal, QCoreApplication, QUrl
+from PySide6.QtGui import QIcon, QFont, QAction, QColor, QDesktopServices
 
 from .assets import get_asset_path
 from ..utils.network_utils import prepare_cookies_for_request
 from .dialogs.CookieHelpDialog import CookieHelpDialog
+from ..core.favorites_manager import UserFavoritesManager
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Background Worker Threads
+#  Background Worker Threads (for Account Favorites with Cookies)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class FavoriteArtistsFetcherThread(QThread):
@@ -213,7 +215,6 @@ class FavoritePostsFetcherThread(QThread):
                         added_date = item.get("added", item.get("published", ""))
 
                         if p_id and service and creator_id:
-                            # Resolve creator name
                             k_tuple = (service.lower(), str(creator_id))
                             creator_name = self.creator_name_cache.get(k_tuple, str(creator_id))
                             all_posts.append({
@@ -258,7 +259,9 @@ class FavoritePostsFetcherThread(QThread):
 class FavoritesTabWidget(QWidget):
     """
     Dedicated Favorites Tab in the sidebar navigation.
-    Provides sub-tabs for browsing, filtering, and queuing Favorite Artists and Favorite Posts.
+    Supports both:
+    1. ⭐ Local Favorites (Stored locally on disk in cache/user_favorites.json without needing cookies or login)
+    2. 🌐 Account Favorites (Fetched from Kemono, Coomer, Pawchive via cookies)
     """
 
     def __init__(self, parent_app, scale=1.0):
@@ -266,9 +269,19 @@ class FavoritesTabWidget(QWidget):
         self.parent_app = parent_app
         self.scale = scale
 
-        self.all_artists = []
+        # User Favorites Manager
+        self.fav_manager = getattr(parent_app, "favorites_manager", None)
+        if not self.fav_manager:
+            base_dir = getattr(parent_app, "app_base_dir", ".")
+            self.fav_manager = UserFavoritesManager(base_dir, parent=self)
+            if parent_app:
+                parent_app.favorites_manager = self.fav_manager
+
+        self.fav_manager.favorites_changed.connect(self._on_local_favorites_changed)
+
+        self.account_artists = []
         self.filtered_artists = []
-        self.all_posts = []
+        self.account_posts = []
         self.filtered_posts = []
 
         self.artists_thread = None
@@ -276,6 +289,9 @@ class FavoritesTabWidget(QWidget):
 
         self._build_ui()
         self._update_cookie_status()
+        self._update_local_stats_badge()
+        self._filter_artists()
+        self._filter_posts()
 
     # ─────────────────────────────────────────────────────────────────────────
     #  UI Construction
@@ -313,11 +329,19 @@ class FavoritesTabWidget(QWidget):
         title_col.addLayout(title_h)
 
         subtitle_lbl = QLabel(
-            "Browse, filter, and batch-download your favorite artists and posts across Kemono, Coomer, and Pawchive."
+            "Browse, filter, and batch-download your favorite artists and posts stored locally (no account/cookies needed) or synced with online accounts."
         )
         subtitle_lbl.setStyleSheet("font-size: 8.5pt; color: #8A8D93; font-weight: normal;")
         title_col.addWidget(subtitle_lbl)
         header_bar.addLayout(title_col, 1)
+
+        # Local storage badge
+        self.local_stats_badge = QLabel("Local: 0 Artists • 0 Posts")
+        self.local_stats_badge.setStyleSheet(
+            "font-size: 8pt; font-weight: bold; color: #FCD34D; background-color: #2D271D; "
+            "border: 1px solid #785A1D; border-radius: 4px; padding: 4px 8px;"
+        )
+        header_bar.addWidget(self.local_stats_badge)
 
         # Cookie Status indicator & Settings button
         self.cookie_status_badge = QLabel("Checking cookies...")
@@ -398,6 +422,21 @@ class FavoritesTabWidget(QWidget):
         tb = QHBoxLayout()
         tb.setSpacing(int(8 * scale))
 
+        # Mode / Source Selector
+        self.artists_source_combo = QComboBox()
+        self.artists_source_combo.addItems([
+            "⭐ Local Favorites (Offline / No Account)",
+            "🌐 Account Favorites (Cookies / API)"
+        ])
+        self.artists_source_combo.setFixedHeight(int(30 * scale))
+        self.artists_source_combo.setStyleSheet(
+            "QComboBox { background: #1A1C20; border: 1.5px solid #E5A198; border-radius: 4px; "
+            "color: #FFFFFF; padding: 0 10px; font-size: 8.5pt; font-weight: bold; }"
+            "QComboBox QAbstractItemView { background: #2A2D34; color: #FFFFFF; selection-background-color: #3B82F6; }"
+        )
+        self.artists_source_combo.currentIndexChanged.connect(self._on_artists_source_changed)
+        tb.addWidget(self.artists_source_combo)
+
         self.artists_search = QLineEdit()
         self.artists_search.setPlaceholderText("Filter artists by name, service, or URL...")
         self.artists_search.setFixedHeight(int(30 * scale))
@@ -409,7 +448,21 @@ class FavoritesTabWidget(QWidget):
         self.artists_search.textChanged.connect(self._filter_artists)
         tb.addWidget(self.artists_search, 2)
 
-        self.fetch_artists_btn = QPushButton(" Fetch Artists")
+        # Quick Add Artist button (Local mode)
+        self.add_artist_btn = QPushButton(" + Add Artist")
+        self.add_artist_btn.setIcon(QIcon(get_asset_path("assets/Svg/star.svg")))
+        self.add_artist_btn.setFixedHeight(int(30 * scale))
+        self.add_artist_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.add_artist_btn.setStyleSheet(
+            "QPushButton { background: #2F2424; border: 1px solid #5A3535; border-radius: 4px; "
+            "color: #E5A198; font-size: 8pt; padding: 0 10px; font-weight: 600; }"
+            "QPushButton:hover { background: #422626; color: #FFFFFF; border-color: #E5A198; }"
+        )
+        self.add_artist_btn.clicked.connect(self._prompt_add_artist)
+        tb.addWidget(self.add_artist_btn)
+
+        # Fetch button (Account mode)
+        self.fetch_artists_btn = QPushButton(" Fetch from Account")
         self.fetch_artists_btn.setIcon(QIcon(get_asset_path("assets/Svg/sync.svg")))
         self.fetch_artists_btn.setFixedHeight(int(30 * scale))
         self.fetch_artists_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -419,7 +472,22 @@ class FavoritesTabWidget(QWidget):
             "QPushButton:hover { background: #353842; border-color: #60A5FA; color: #FFFFFF; }"
         )
         self.fetch_artists_btn.clicked.connect(self._start_fetch_artists)
+        self.fetch_artists_btn.setVisible(False)
         tb.addWidget(self.fetch_artists_btn)
+
+        # Import to Local button (Account mode)
+        self.import_artists_btn = QPushButton(" Save to Local")
+        self.import_artists_btn.setIcon(QIcon(get_asset_path("assets/Svg/star.svg")))
+        self.import_artists_btn.setFixedHeight(int(30 * scale))
+        self.import_artists_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.import_artists_btn.setStyleSheet(
+            "QPushButton { background: #382A1B; border: 1px solid #785A1D; border-radius: 4px; "
+            "color: #FCD34D; font-size: 8pt; padding: 0 10px; font-weight: 600; }"
+            "QPushButton:hover { background: #4A3824; color: #FFFFFF; border-color: #FCD34D; }"
+        )
+        self.import_artists_btn.clicked.connect(self._import_fetched_artists_to_local)
+        self.import_artists_btn.setVisible(False)
+        tb.addWidget(self.import_artists_btn)
 
         self.sel_all_artists_btn = QPushButton("Select All")
         self.sel_all_artists_btn.setFixedHeight(int(30 * scale))
@@ -441,11 +509,41 @@ class FavoritesTabWidget(QWidget):
         self.desel_all_artists_btn.clicked.connect(self._deselect_all_artists)
         tb.addWidget(self.desel_all_artists_btn)
 
-        self.artists_count_lbl = QLabel("0 artists found")
+        self.artists_count_lbl = QLabel("0 artists")
         self.artists_count_lbl.setStyleSheet("color: #E5A198; font-size: 8.5pt; font-weight: 500;")
         tb.addWidget(self.artists_count_lbl)
 
         tb.addStretch(1)
+
+        # View Posts button (Local mode)
+        self.view_artist_posts_btn = QPushButton("  View Posts")
+        self.view_artist_posts_btn.setIcon(QIcon(get_asset_path("assets/uisvg/manga.svg")))
+        self.view_artist_posts_btn.setFixedHeight(int(30 * scale))
+        self.view_artist_posts_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.view_artist_posts_btn.setEnabled(False)
+        self.view_artist_posts_btn.setStyleSheet(
+            "QPushButton { background: #20232B; border: 1px solid #333742; border-radius: 4px; "
+            "color: #DFE1E5; font-size: 8.5pt; font-weight: bold; padding: 0 12px; }"
+            "QPushButton:hover { background: #2A2E38; border-color: #E5A198; color: #FFFFFF; }"
+            "QPushButton:disabled { background: #18191E; border-color: #262930; color: #555A66; }"
+        )
+        self.view_artist_posts_btn.clicked.connect(self._view_selected_artist_posts)
+        tb.addWidget(self.view_artist_posts_btn)
+
+        # Remove from local favorites button
+        self.remove_artist_btn = QPushButton("  Remove")
+        self.remove_artist_btn.setIcon(QIcon(get_asset_path("assets/uisvg/delete.svg")))
+        self.remove_artist_btn.setFixedHeight(int(30 * scale))
+        self.remove_artist_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.remove_artist_btn.setEnabled(False)
+        self.remove_artist_btn.setStyleSheet(
+            "QPushButton { background: #2E1F1F; border: 1px solid #4D2626; border-radius: 4px; "
+            "color: #F87171; font-size: 8.5pt; font-weight: bold; padding: 0 10px; }"
+            "QPushButton:hover { background: #3D2222; border-color: #EF4444; color: #FFFFFF; }"
+            "QPushButton:disabled { background: #1E1919; border-color: #2B2121; color: #554444; }"
+        )
+        self.remove_artist_btn.clicked.connect(self._remove_selected_artists)
+        tb.addWidget(self.remove_artist_btn)
 
         self.download_artists_btn = QPushButton("  Download Selected")
         self.download_artists_btn.setIcon(QIcon(get_asset_path("assets/Svg/download.svg")))
@@ -464,7 +562,7 @@ class FavoritesTabWidget(QWidget):
         layout.addLayout(tb)
 
         # Status & Progress row
-        self.artists_status_lbl = QLabel("Click 'Fetch Artists' to load your saved favorite creators.")
+        self.artists_status_lbl = QLabel("Artists saved locally on this machine (no cookies or login required).")
         self.artists_status_lbl.setStyleSheet("color: #9CA3AF; font-size: 8.5pt; font-style: italic;")
         layout.addWidget(self.artists_status_lbl)
 
@@ -504,6 +602,9 @@ class FavoritesTabWidget(QWidget):
             }
         """)
         self.artists_list.itemChanged.connect(self._update_artists_count)
+        self.artists_list.itemDoubleClicked.connect(self._on_artist_double_clicked)
+        self.artists_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.artists_list.customContextMenuRequested.connect(self._show_artists_context_menu)
         layout.addWidget(self.artists_list, 1)
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -520,8 +621,23 @@ class FavoritesTabWidget(QWidget):
         tb = QHBoxLayout()
         tb.setSpacing(int(8 * scale))
 
+        # Mode / Source Selector
+        self.posts_source_combo = QComboBox()
+        self.posts_source_combo.addItems([
+            "⭐ Local Favorites (Offline / No Account)",
+            "🌐 Account Favorites (Cookies / API)"
+        ])
+        self.posts_source_combo.setFixedHeight(int(30 * scale))
+        self.posts_source_combo.setStyleSheet(
+            "QComboBox { background: #1A1C20; border: 1.5px solid #E5A198; border-radius: 4px; "
+            "color: #FFFFFF; padding: 0 10px; font-size: 8.5pt; font-weight: bold; }"
+            "QComboBox QAbstractItemView { background: #2A2D34; color: #FFFFFF; selection-background-color: #3B82F6; }"
+        )
+        self.posts_source_combo.currentIndexChanged.connect(self._on_posts_source_changed)
+        tb.addWidget(self.posts_source_combo)
+
         self.posts_platform_combo = QComboBox()
-        self.posts_platform_combo.addItems(["All Platforms", "Kemono", "Coomer", "Pawchive"])
+        self.posts_platform_combo.addItems(["All Platforms", "Patreon", "Pixiv Fanbox", "Fantia", "Discord"])
         self.posts_platform_combo.setFixedHeight(int(30 * scale))
         self.posts_platform_combo.setStyleSheet(
             "QComboBox { background: #1A1C20; border: 1px solid #383D48; border-radius: 4px; "
@@ -542,7 +658,8 @@ class FavoritesTabWidget(QWidget):
         self.posts_search.textChanged.connect(self._filter_posts)
         tb.addWidget(self.posts_search, 2)
 
-        self.fetch_posts_btn = QPushButton(" Fetch Posts")
+        # Fetch button (Account mode)
+        self.fetch_posts_btn = QPushButton(" Fetch from Account")
         self.fetch_posts_btn.setIcon(QIcon(get_asset_path("assets/Svg/sync.svg")))
         self.fetch_posts_btn.setFixedHeight(int(30 * scale))
         self.fetch_posts_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -552,7 +669,22 @@ class FavoritesTabWidget(QWidget):
             "QPushButton:hover { background: #353842; border-color: #60A5FA; color: #FFFFFF; }"
         )
         self.fetch_posts_btn.clicked.connect(self._start_fetch_posts)
+        self.fetch_posts_btn.setVisible(False)
         tb.addWidget(self.fetch_posts_btn)
+
+        # Import to Local button (Account mode)
+        self.import_posts_btn = QPushButton(" Save to Local")
+        self.import_posts_btn.setIcon(QIcon(get_asset_path("assets/Svg/star.svg")))
+        self.import_posts_btn.setFixedHeight(int(30 * scale))
+        self.import_posts_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.import_posts_btn.setStyleSheet(
+            "QPushButton { background: #382A1B; border: 1px solid #785A1D; border-radius: 4px; "
+            "color: #FCD34D; font-size: 8pt; padding: 0 10px; font-weight: 600; }"
+            "QPushButton:hover { background: #4A3824; color: #FFFFFF; border-color: #FCD34D; }"
+        )
+        self.import_posts_btn.clicked.connect(self._import_fetched_posts_to_local)
+        self.import_posts_btn.setVisible(False)
+        tb.addWidget(self.import_posts_btn)
 
         self.sel_all_posts_btn = QPushButton("Select All")
         self.sel_all_posts_btn.setFixedHeight(int(30 * scale))
@@ -574,11 +706,41 @@ class FavoritesTabWidget(QWidget):
         self.desel_all_posts_btn.clicked.connect(self._deselect_all_posts)
         tb.addWidget(self.desel_all_posts_btn)
 
-        self.posts_count_lbl = QLabel("0 posts found")
+        self.posts_count_lbl = QLabel("0 posts")
         self.posts_count_lbl.setStyleSheet("color: #E5A198; font-size: 8.5pt; font-weight: 500;")
         tb.addWidget(self.posts_count_lbl)
 
         tb.addStretch(1)
+
+        # View Post in App button (Local mode)
+        self.view_post_btn = QPushButton("  View in App")
+        self.view_post_btn.setIcon(QIcon(get_asset_path("assets/uisvg/play.svg")))
+        self.view_post_btn.setFixedHeight(int(30 * scale))
+        self.view_post_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.view_post_btn.setEnabled(False)
+        self.view_post_btn.setStyleSheet(
+            "QPushButton { background: #20232B; border: 1px solid #333742; border-radius: 4px; "
+            "color: #DFE1E5; font-size: 8.5pt; font-weight: bold; padding: 0 12px; }"
+            "QPushButton:hover { background: #2A2E38; border-color: #E5A198; color: #FFFFFF; }"
+            "QPushButton:disabled { background: #18191E; border-color: #262930; color: #555A66; }"
+        )
+        self.view_post_btn.clicked.connect(self._view_selected_post)
+        tb.addWidget(self.view_post_btn)
+
+        # Remove from local favorites button
+        self.remove_post_btn = QPushButton("  Remove")
+        self.remove_post_btn.setIcon(QIcon(get_asset_path("assets/uisvg/delete.svg")))
+        self.remove_post_btn.setFixedHeight(int(30 * scale))
+        self.remove_post_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.remove_post_btn.setEnabled(False)
+        self.remove_post_btn.setStyleSheet(
+            "QPushButton { background: #2E1F1F; border: 1px solid #4D2626; border-radius: 4px; "
+            "color: #F87171; font-size: 8.5pt; font-weight: bold; padding: 0 10px; }"
+            "QPushButton:hover { background: #3D2222; border-color: #EF4444; color: #FFFFFF; }"
+            "QPushButton:disabled { background: #1E1919; border-color: #2B2121; color: #554444; }"
+        )
+        self.remove_post_btn.clicked.connect(self._remove_selected_posts)
+        tb.addWidget(self.remove_post_btn)
 
         self.download_posts_btn = QPushButton("  Download Selected")
         self.download_posts_btn.setIcon(QIcon(get_asset_path("assets/Svg/download.svg")))
@@ -597,7 +759,7 @@ class FavoritesTabWidget(QWidget):
         layout.addLayout(tb)
 
         # Status & Progress row
-        self.posts_status_lbl = QLabel("Click 'Fetch Posts' to load bookmarked posts from your accounts.")
+        self.posts_status_lbl = QLabel("Posts saved locally on this machine (no cookies or login required).")
         self.posts_status_lbl.setStyleSheet("color: #9CA3AF; font-size: 8.5pt; font-style: italic;")
         layout.addWidget(self.posts_status_lbl)
 
@@ -637,15 +799,60 @@ class FavoritesTabWidget(QWidget):
             }
         """)
         self.posts_list.itemChanged.connect(self._update_posts_count)
+        self.posts_list.itemDoubleClicked.connect(self._on_post_double_clicked)
+        self.posts_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.posts_list.customContextMenuRequested.connect(self._show_posts_context_menu)
         layout.addWidget(self.posts_list, 1)
 
     # ─────────────────────────────────────────────────────────────────────────
-    #  Tab Activation & Cookie Handling
+    #  Tab Activation & Local State
     # ─────────────────────────────────────────────────────────────────────────
 
     def on_tab_activated(self):
         """Called whenever user switches to Favorites tab in the sidebar."""
         self._update_cookie_status()
+        self._update_local_stats_badge()
+        if self._is_local_artists_mode():
+            self._filter_artists()
+        if self._is_local_posts_mode():
+            self._filter_posts()
+
+    def _on_local_favorites_changed(self):
+        self._update_local_stats_badge()
+        if self._is_local_artists_mode():
+            self._filter_artists()
+        if self._is_local_posts_mode():
+            self._filter_posts()
+
+    def _update_local_stats_badge(self):
+        if not hasattr(self, "local_stats_badge") or not self.fav_manager:
+            return
+        c_count = self.fav_manager.get_favorites_count()
+        p_count = self.fav_manager.get_posts_count()
+        self.local_stats_badge.setText(f"Local: {c_count} Artist{'s' if c_count != 1 else ''} • {p_count} Post{'s' if p_count != 1 else ''}")
+
+    def _is_local_artists_mode(self) -> bool:
+        return self.artists_source_combo.currentIndex() == 0
+
+    def _is_local_posts_mode(self) -> bool:
+        return self.posts_source_combo.currentIndex() == 0
+
+    def _on_artists_source_changed(self, index: int):
+        is_local = (index == 0)
+        self.add_artist_btn.setVisible(is_local)
+        self.fetch_artists_btn.setVisible(not is_local)
+        self.import_artists_btn.setVisible(not is_local)
+        self.view_artist_posts_btn.setVisible(is_local)
+        self.remove_artist_btn.setVisible(is_local)
+        self._filter_artists()
+
+    def _on_posts_source_changed(self, index: int):
+        is_local = (index == 0)
+        self.fetch_posts_btn.setVisible(not is_local)
+        self.import_posts_btn.setVisible(not is_local)
+        self.view_post_btn.setVisible(is_local)
+        self.remove_post_btn.setVisible(is_local)
+        self._filter_posts()
 
     def _get_cookies_config(self):
         return {
@@ -674,7 +881,7 @@ class FavoritesTabWidget(QWidget):
                 "border: 1px solid #D97706; border-radius: 4px; padding: 4px 8px;"
             )
         else:
-            self.cookie_status_badge.setText("Cookies: Off (Required for Private Favorites)")
+            self.cookie_status_badge.setText("Cookies: Off (Optional for Account Sync)")
             self.cookie_status_badge.setStyleSheet(
                 "font-size: 8pt; font-weight: bold; color: #9CA3AF; background-color: #1F2937; "
                 "border: 1px solid #374151; border-radius: 4px; padding: 4px 8px;"
@@ -688,6 +895,37 @@ class FavoritesTabWidget(QWidget):
     # ─────────────────────────────────────────────────────────────────────────
     #  Favorite Artists Logic
     # ─────────────────────────────────────────────────────────────────────────
+
+    def _prompt_add_artist(self):
+        text, ok = QInputDialog.getText(
+            self, "Add Favorite Artist",
+            "Enter artist URL (e.g. https://pawchive.pw/patreon/user/3295915) or 'service:id':",
+            QLineEdit.EchoMode.Normal
+        )
+        if ok and text.strip():
+            raw = text.strip()
+            svc, cid = None, None
+            m = re.search(r'(?:kemono|coomer|pawchive)[^/]+/([^/]+)/user/([^/?#]+)', raw, re.IGNORECASE)
+            if m:
+                svc = m.group(1).lower()
+                cid = m.group(2)
+            elif ":" in raw:
+                parts = raw.split(":")
+                svc = parts[0].strip().lower()
+                cid = parts[1].strip()
+
+            if svc and cid:
+                creator = {
+                    "service": svc,
+                    "id": cid,
+                    "name": cid,
+                    "url": f"https://pawchive.pw/{svc}/user/{cid}"
+                }
+                self.fav_manager.add_creator(creator)
+                self._filter_artists()
+                QMessageBox.information(self, "Artist Added", f"Added {svc.capitalize()} artist '{cid}' to local favorites!")
+            else:
+                QMessageBox.warning(self, "Invalid Format", "Could not parse artist service and ID from input.\nPlease use format: 'service:id' or paste full URL.")
 
     def _start_fetch_artists(self):
         if self.artists_thread and self.artists_thread.isRunning():
@@ -710,35 +948,69 @@ class FavoritesTabWidget(QWidget):
         self.artists_progress_bar.setVisible(False)
 
         if success and artists_list:
-            self.all_artists = artists_list
-            self.artists_status_lbl.setText(f"Found {len(self.all_artists)} favorite artist(s).")
+            self.account_artists = artists_list
+            self.artists_status_lbl.setText(f"Found {len(self.account_artists)} favorite artist(s) from account.")
             self._filter_artists()
         else:
-            self.artists_status_lbl.setText(f"{err_msg or 'No favorite artists found.'}")
-            if not self.all_artists:
+            self.artists_status_lbl.setText(f"{err_msg or 'No favorite artists found on connected accounts.'}")
+            if not self.account_artists:
                 self.artists_list.clear()
             self._update_artists_count()
+
+    def _import_fetched_artists_to_local(self):
+        if not self.account_artists:
+            QMessageBox.information(self, "No Artists", "Please fetch account artists first before saving to local.")
+            return
+        added_count = 0
+        for a in self.account_artists:
+            creator = {
+                "service": a.get("service") or "patreon",
+                "id": str(a.get("id") or ""),
+                "name": a.get("name") or "Artist",
+                "url": a.get("url") or f"https://pawchive.pw/{a.get('service')}/user/{a.get('id')}"
+            }
+            if self.fav_manager.add_creator(creator):
+                added_count += 1
+        QMessageBox.information(
+            self, "Import Completed",
+            f"Saved {added_count} new artist(s) to your Local Favorites list!\n"
+            f"You can now browse them offline without needing cookies."
+        )
+        self.artists_source_combo.setCurrentIndex(0)  # Switch back to local view
 
     def _filter_artists(self):
         query = self.artists_search.text().lower().strip()
         self.artists_list.blockSignals(True)
         self.artists_list.clear()
 
+        is_local = self._is_local_artists_mode()
+        source_data = self.fav_manager.get_all_creators() if is_local else self.account_artists
+
         if query:
             self.filtered_artists = [
-                a for a in self.all_artists
-                if query in a['name'].lower() or query in a['service'].lower() or query in a['url'].lower()
+                a for a in source_data
+                if query in (a.get('name') or '').lower()
+                or query in (a.get('service') or '').lower()
+                or query in (a.get('url') or '').lower()
+                or query in str(a.get('id') or '').lower()
             ]
         else:
-            self.filtered_artists = list(self.all_artists)
+            self.filtered_artists = list(source_data)
 
         for a in self.filtered_artists:
             item = QListWidgetItem()
-            item.setIcon(QIcon(get_asset_path("assets/uisvg/image.svg")))
-            svc = a.get('service', 'N/A').capitalize()
-            src = a.get('_source_api', '')
-            item.setText(f"{a['name']}   [{svc}]   ({src})")
-            item.setToolTip(f"URL: {a['url']}\nService: {svc}\nArtist ID: {a['id']}")
+            icon_file = "assets/Svg/star.svg" if is_local else "assets/uisvg/image.svg"
+            item.setIcon(QIcon(get_asset_path(icon_file)))
+
+            name = a.get('name') or "Unknown Artist"
+            svc = (a.get('service') or 'N/A').capitalize()
+            cid = str(a.get('id') or '')
+            date_added = a.get('date_added', '')
+            date_str = f" • Favorited: {date_added[:10]}" if date_added else ""
+            src_str = f"   ({a.get('_source_api')})" if a.get('_source_api') else ""
+
+            item.setText(f"{name}   [{svc}]   (ID: {cid}){src_str}{date_str}")
+            item.setToolTip(f"Name: {name}\nService: {svc}\nArtist ID: {cid}\nURL: {a.get('url', '')}\nDouble-click to view posts in app")
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(Qt.CheckState.Unchecked)
             item.setData(Qt.ItemDataRole.UserRole, a)
@@ -746,6 +1018,12 @@ class FavoritesTabWidget(QWidget):
 
         self.artists_list.blockSignals(False)
         self._update_artists_count()
+
+        if is_local:
+            if not self.filtered_artists:
+                self.artists_status_lbl.setText("No local favorite artists saved yet. Star creators in Creators tab or click '+ Add Artist'.")
+            else:
+                self.artists_status_lbl.setText(f"{len(self.filtered_artists)} favorite artist(s) stored locally on this PC.")
 
     def _select_all_artists(self):
         self.artists_list.blockSignals(True)
@@ -770,16 +1048,109 @@ class FavoritesTabWidget(QWidget):
         self.artists_count_lbl.setText(f"{total} artists • {selected} selected")
         self.download_artists_btn.setEnabled(selected > 0)
         self.download_artists_btn.setText(f"  Download Selected ({selected})" if selected > 0 else "  Download Selected")
+        self.view_artist_posts_btn.setEnabled(selected == 1)
+        self.remove_artist_btn.setEnabled(selected > 0)
 
-    def _download_selected_artists(self):
-        selected_artists = []
+    def _get_selected_artists(self) -> list:
+        selected = []
         for i in range(self.artists_list.count()):
             it = self.artists_list.item(i)
             if it.checkState() == Qt.CheckState.Checked:
                 data = it.data(Qt.ItemDataRole.UserRole)
                 if data:
-                    selected_artists.append(data)
+                    selected.append(data)
+        return selected
 
+    def _on_artist_double_clicked(self, item: QListWidgetItem):
+        data = item.data(Qt.ItemDataRole.UserRole)
+        if data:
+            self._open_artist_posts(data)
+
+    def _view_selected_artist_posts(self):
+        selected = self._get_selected_artists()
+        if selected:
+            self._open_artist_posts(selected[0])
+
+    def _open_artist_posts(self, artist_data: dict):
+        if hasattr(self.parent_app, "posts_tab") and hasattr(self.parent_app, "switch_tab"):
+            svc = artist_data.get("service") or "patreon"
+            cid = str(artist_data.get("id") or "")
+            creator = {
+                "service": svc,
+                "id": cid,
+                "name": artist_data.get("name") or "Artist",
+                "url": artist_data.get("url") or f"https://pawchive.pw/{svc}/user/{cid}"
+            }
+            if hasattr(self.parent_app.posts_tab, "_close_post_detail"):
+                self.parent_app.posts_tab._close_post_detail()
+            self.parent_app.switch_tab("posts")
+            self.parent_app.posts_tab.load_creators([creator])
+
+    def _remove_selected_artists(self):
+        selected = self._get_selected_artists()
+        if not selected:
+            QMessageBox.information(self, "No Selection", "Please select at least one artist to remove.")
+            return
+
+        res = QMessageBox.question(
+            self, "Remove Favorites",
+            f"Remove {len(selected)} artist(s) from your local favorites list?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if res == QMessageBox.StandardButton.Yes:
+            for a in selected:
+                self.fav_manager.remove_creator(a.get("service"), a.get("id"))
+            self._filter_artists()
+
+    def _show_artists_context_menu(self, pos):
+        item = self.artists_list.itemAt(pos)
+        if not item:
+            return
+        data = item.data(Qt.ItemDataRole.UserRole)
+        if not data:
+            return
+
+        menu = QMenu(self)
+        view_act = menu.addAction(QIcon(get_asset_path("assets/uisvg/manga.svg")), "View Posts in App")
+        view_act.triggered.connect(lambda: self._open_artist_posts(data))
+
+        dl_act = menu.addAction(QIcon(get_asset_path("assets/Svg/download.svg")), "Send to Downloader")
+        dl_act.triggered.connect(lambda: self._download_single_artist(data))
+
+        copy_act = menu.addAction(QIcon(get_asset_path("assets/Svg/copy.svg")), "Copy Artist URL")
+        copy_act.triggered.connect(lambda: QApplication.clipboard().setText(data.get("url", "")))
+
+        open_act = menu.addAction(QIcon(get_asset_path("assets/Svg/eye_open.svg")), "Open in Browser")
+        open_act.triggered.connect(lambda: QDesktopServices.openUrl(QUrl(data.get("url", ""))))
+
+        menu.addSeparator()
+        if self._is_local_artists_mode():
+            rem_act = menu.addAction(QIcon(get_asset_path("assets/uisvg/delete.svg")), "Remove from Local Favorites")
+            rem_act.triggered.connect(lambda: (self.fav_manager.remove_creator(data.get("service"), data.get("id")), self._filter_artists()))
+        else:
+            save_act = menu.addAction(QIcon(get_asset_path("assets/Svg/star.svg")), "Save to Local Favorites")
+            save_act.triggered.connect(lambda: (self.fav_manager.add_creator(data), QMessageBox.information(self, "Saved", f"Saved {data.get('name')} to local favorites!")))
+
+        menu.exec(self.artists_list.viewport().mapToGlobal(pos))
+
+    def _download_single_artist(self, a: dict):
+        if not a:
+            return
+        url = a.get("url") or f"https://pawchive.pw/{a.get('service')}/user/{a.get('id')}"
+        name = a.get("name") or "Artist"
+        self.parent_app.favorite_download_queue.append({
+            'url': url,
+            'name': name,
+            'name_for_folder': name,
+            'type': 'artist'
+        })
+        if not self.parent_app.is_processing_favorites_queue:
+            self.parent_app._process_next_favorite_download()
+        if hasattr(self.parent_app, 'switch_tab'):
+            self.parent_app.switch_tab("queue")
+
+    def _download_selected_artists(self):
+        selected_artists = self._get_selected_artists()
         if not selected_artists:
             QMessageBox.information(self, "No Selection", "Please select at least one artist to download.")
             return
@@ -788,17 +1159,18 @@ class FavoritesTabWidget(QWidget):
             self.parent_app.log_signal.emit(f"Queuing {len(selected_artists)} favorite artist(s) for download.")
 
         for a in selected_artists:
+            url = a.get("url") or f"https://pawchive.pw/{a.get('service')}/user/{a.get('id')}"
+            name = a.get("name") or "Artist"
             self.parent_app.favorite_download_queue.append({
-                'url': a['url'],
-                'name': a['name'],
-                'name_for_folder': a['name'],
+                'url': url,
+                'name': name,
+                'name_for_folder': name,
                 'type': 'artist'
             })
 
         if not self.parent_app.is_processing_favorites_queue:
             self.parent_app._process_next_favorite_download()
 
-        # Switch to Queue tab so user can see progress
         if hasattr(self.parent_app, 'switch_tab'):
             self.parent_app.switch_tab("queue")
 
@@ -840,14 +1212,39 @@ class FavoritesTabWidget(QWidget):
         self.posts_progress_bar.setVisible(False)
 
         if success and posts_list:
-            self.all_posts = posts_list
-            self.posts_status_lbl.setText(f"Found {len(self.all_posts)} favorite post(s).")
+            self.account_posts = posts_list
+            self.posts_status_lbl.setText(f"Found {len(self.account_posts)} favorite post(s) from account.")
             self._filter_posts()
         else:
-            self.posts_status_lbl.setText(f"{err_msg or 'No favorite posts found.'}")
-            if not self.all_posts:
+            self.posts_status_lbl.setText(f"{err_msg or 'No favorite posts found on connected accounts.'}")
+            if not self.account_posts:
                 self.posts_list.clear()
             self._update_posts_count()
+
+    def _import_fetched_posts_to_local(self):
+        if not self.account_posts:
+            QMessageBox.information(self, "No Posts", "Please fetch account posts first before saving to local.")
+            return
+        added_count = 0
+        for p in self.account_posts:
+            post_dict = {
+                "id": str(p.get("post_id") or ""),
+                "title": p.get("title") or "Untitled Post",
+                "service": p.get("service") or "patreon",
+                "user": str(p.get("creator_id") or ""),
+                "_creator_name": p.get("creator_name_resolved") or "",
+                "_creator_service": p.get("service") or "",
+                "_creator_id": str(p.get("creator_id") or ""),
+                "published": p.get("added_date") or "",
+            }
+            if self.fav_manager.add_post(post_dict):
+                added_count += 1
+        QMessageBox.information(
+            self, "Import Completed",
+            f"Saved {added_count} new post(s) to your Local Favorites list!\n"
+            f"You can now view them offline without needing cookies."
+        )
+        self.posts_source_combo.setCurrentIndex(0)  # Switch back to local view
 
     def _filter_posts(self):
         query = self.posts_search.text().lower().strip()
@@ -856,21 +1253,26 @@ class FavoritesTabWidget(QWidget):
         self.posts_list.blockSignals(True)
         self.posts_list.clear()
 
-        # Group by (service, creator_id)
+        is_local = self._is_local_posts_mode()
+        source_data = self.fav_manager.get_all_posts() if is_local else self.account_posts
+
         filtered = []
-        for p in self.all_posts:
+        for p in source_data:
+            svc = (p.get('service') or '').lower()
             if pref != "all platforms":
                 src = (p.get('_source_api') or '').lower()
-                svc = (p.get('service') or '').lower()
                 if pref not in src and pref not in svc:
-                    continue
+                    # Check friendly names
+                    if pref == "pixiv fanbox" and svc != "fanbox":
+                        continue
+                    elif pref != "pixiv fanbox" and pref not in svc:
+                        continue
 
             if query:
-                t = p.get('title', '').lower()
-                cr = p.get('creator_name_resolved', '').lower()
-                cid = p.get('creator_id', '').lower()
-                pid = p.get('post_id', '').lower()
-                svc = p.get('service', '').lower()
+                t = (p.get('title') or '').lower()
+                cr = (p.get('creator_name') or p.get('creator_name_resolved') or '').lower()
+                cid = str(p.get('creator_id') or p.get('user') or '').lower()
+                pid = str(p.get('post_id') or p.get('id') or '').lower()
                 if query not in t and query not in cr and query not in cid and query not in pid and query not in svc:
                     continue
             filtered.append(p)
@@ -880,28 +1282,35 @@ class FavoritesTabWidget(QWidget):
         # Populate list grouped by creator
         grouped = defaultdict(list)
         for p in filtered:
-            k = (p.get('service', 'N/A'), p.get('creator_id', 'Unknown'), p.get('creator_name_resolved', 'Unknown'))
-            grouped[k].append(p)
+            svc = p.get('service', 'N/A')
+            cid = str(p.get('creator_id') or p.get('user') or 'Unknown')
+            cname = p.get('creator_name') or p.get('creator_name_resolved') or cid
+            grouped[(svc, cid, cname)].append(p)
 
         for (svc, cid, cname), p_list in grouped.items():
             # Creator Header
-            hdr = QListWidgetItem(f"{cname}  [{svc.capitalize()} / {cid}]  ({len(p_list)} posts)")
+            hdr = QListWidgetItem(f"{cname}  [{svc.capitalize()} / {cid}]  ({len(p_list)} post{'s' if len(p_list) != 1 else ''})")
             hdr.setIcon(QIcon(get_asset_path("assets/Svg/user.svg")))
             hdr.setFlags(Qt.ItemFlag.NoItemFlags)
             font = hdr.font()
             font.setBold(True)
             hdr.setFont(font)
-            hdr.setForeground(Qt.GlobalColor.cyan)
+            hdr.setForeground(QColor("#E5A198"))
             self.posts_list.addItem(hdr)
 
             # Posts under this creator
             for post_data in p_list:
                 it = QListWidgetItem()
-                it.setIcon(QIcon(get_asset_path("assets/uisvg/manga.svg")))
-                title = post_data.get('title', 'Untitled Post')
-                date_str = f" • {post_data['added_date'][:10]}" if post_data.get('added_date') else ""
+                icon_file = "assets/Svg/star.svg" if is_local else "assets/uisvg/manga.svg"
+                it.setIcon(QIcon(get_asset_path(icon_file)))
+
+                title = post_data.get('title') or 'Untitled Post'
+                pub_date = post_data.get('published') or post_data.get('added_date') or ''
+                date_str = f" • {str(pub_date)[:10]}" if pub_date else ""
                 it.setText(f"{title}{date_str}")
-                it.setToolTip(f"Post ID: {post_data['post_id']}\nCreator: {cname}\nService: {svc}\nSource: {post_data.get('_source_api')}")
+
+                pid = str(post_data.get('post_id') or post_data.get('id') or '')
+                it.setToolTip(f"Post ID: {pid}\nCreator: {cname}\nService: {svc}\nDouble-click to view media & description in app")
                 it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                 it.setCheckState(Qt.CheckState.Unchecked)
                 it.setData(Qt.ItemDataRole.UserRole, post_data)
@@ -909,6 +1318,12 @@ class FavoritesTabWidget(QWidget):
 
         self.posts_list.blockSignals(False)
         self._update_posts_count()
+
+        if is_local:
+            if not self.filtered_posts:
+                self.posts_status_lbl.setText("No local favorite posts saved yet. Click '☆ Favorite' on any post to bookmark it.")
+            else:
+                self.posts_status_lbl.setText(f"{len(self.filtered_posts)} favorite post(s) stored locally on this PC.")
 
     def _select_all_posts(self):
         self.posts_list.blockSignals(True)
@@ -940,16 +1355,130 @@ class FavoritesTabWidget(QWidget):
         self.posts_count_lbl.setText(f"{total} posts • {selected} selected")
         self.download_posts_btn.setEnabled(selected > 0)
         self.download_posts_btn.setText(f"  Download Selected ({selected})" if selected > 0 else "  Download Selected")
+        self.view_post_btn.setEnabled(selected == 1)
+        self.remove_post_btn.setEnabled(selected > 0)
 
-    def _download_selected_posts(self):
-        selected_posts = []
+    def _get_selected_posts(self) -> list:
+        selected = []
         for i in range(self.posts_list.count()):
             it = self.posts_list.item(i)
             if it.flags() & Qt.ItemFlag.ItemIsUserCheckable and it.checkState() == Qt.CheckState.Checked:
                 data = it.data(Qt.ItemDataRole.UserRole)
                 if data:
-                    selected_posts.append(data)
+                    selected.append(data)
+        return selected
 
+    def _on_post_double_clicked(self, item: QListWidgetItem):
+        data = item.data(Qt.ItemDataRole.UserRole)
+        if data:
+            self._open_post_in_app(data)
+
+    def _view_selected_post(self):
+        selected = self._get_selected_posts()
+        if selected:
+            self._open_post_in_app(selected[0])
+
+    def _open_post_in_app(self, post_data: dict):
+        if not hasattr(self.parent_app, "posts_tab") or not hasattr(self.parent_app, "switch_tab"):
+            return
+
+        post = post_data.get("post_payload")
+        if not post:
+            svc = post_data.get("service") or "patreon"
+            cid = str(post_data.get("creator_id") or post_data.get("user") or "")
+            pid = str(post_data.get("post_id") or post_data.get("id") or "")
+            post = {
+                "id": pid,
+                "title": post_data.get("title") or f"Post #{pid}",
+                "service": svc,
+                "user": cid,
+                "_creator_service": svc,
+                "_creator_id": cid,
+                "_creator_name": post_data.get("creator_name") or post_data.get("creator_name_resolved") or "Creator",
+                "published": post_data.get("published") or post_data.get("added_date") or "",
+            }
+
+        self.parent_app.switch_tab("posts")
+        self.parent_app.posts_tab._open_post_detail(post)
+
+    def _remove_selected_posts(self):
+        selected = self._get_selected_posts()
+        if not selected:
+            QMessageBox.information(self, "No Selection", "Please select at least one post to remove.")
+            return
+
+        res = QMessageBox.question(
+            self, "Remove Favorites",
+            f"Remove {len(selected)} post(s) from your local favorites list?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if res == QMessageBox.StandardButton.Yes:
+            for p in selected:
+                svc = p.get("service")
+                cid = str(p.get("creator_id") or p.get("user") or "")
+                pid = str(p.get("post_id") or p.get("id") or "")
+                self.fav_manager.remove_post(svc, cid, pid)
+            self._filter_posts()
+
+    def _show_posts_context_menu(self, pos):
+        item = self.posts_list.itemAt(pos)
+        if not item or not (item.flags() & Qt.ItemFlag.ItemIsUserCheckable):
+            return
+        data = item.data(Qt.ItemDataRole.UserRole)
+        if not data:
+            return
+
+        menu = QMenu(self)
+        view_act = menu.addAction(QIcon(get_asset_path("assets/uisvg/play.svg")), "View Post in App (Media Player)")
+        view_act.triggered.connect(lambda: self._open_post_in_app(data))
+
+        dl_act = menu.addAction(QIcon(get_asset_path("assets/Svg/download.svg")), "Send to Downloader")
+        dl_act.triggered.connect(lambda: self._download_single_post(data))
+
+        copy_act = menu.addAction(QIcon(get_asset_path("assets/Svg/copy.svg")), "Copy Post URL")
+        copy_act.triggered.connect(lambda: QApplication.clipboard().setText(self._get_post_url(data)))
+
+        open_act = menu.addAction(QIcon(get_asset_path("assets/Svg/eye_open.svg")), "Open in Browser")
+        open_act.triggered.connect(lambda: QDesktopServices.openUrl(QUrl(self._get_post_url(data))))
+
+        menu.addSeparator()
+        if self._is_local_posts_mode():
+            rem_act = menu.addAction(QIcon(get_asset_path("assets/uisvg/delete.svg")), "Remove from Local Favorites")
+            svc = data.get("service")
+            cid = str(data.get("creator_id") or data.get("user") or "")
+            pid = str(data.get("post_id") or data.get("id") or "")
+            rem_act.triggered.connect(lambda: (self.fav_manager.remove_post(svc, cid, pid), self._filter_posts()))
+        else:
+            save_act = menu.addAction(QIcon(get_asset_path("assets/Svg/star.svg")), "Save to Local Favorites")
+            save_act.triggered.connect(lambda: (self.fav_manager.add_post(data), QMessageBox.information(self, "Saved", f"Saved post to local favorites!")))
+
+        menu.exec(self.posts_list.viewport().mapToGlobal(pos))
+
+    def _get_post_url(self, post_data: dict) -> str:
+        if post_data.get("url"):
+            return post_data["url"]
+        svc = post_data.get("service") or "patreon"
+        cid = str(post_data.get("creator_id") or post_data.get("user") or "")
+        pid = str(post_data.get("post_id") or post_data.get("id") or "")
+        return f"https://pawchive.pw/{svc}/user/{cid}/post/{pid}" if cid else f"https://pawchive.pw/{svc}/post/{pid}"
+
+    def _download_single_post(self, post_data: dict):
+        if not post_data:
+            return
+        direct_post_url = self._get_post_url(post_data)
+        self.parent_app.favorite_download_queue.append({
+            'url': direct_post_url,
+            'name': post_data.get('title') or f"Post #{post_data.get('post_id')}",
+            'name_for_folder': post_data.get('creator_name', post_data.get('creator_name_resolved', post_data.get('creator_id', 'Unknown'))),
+            'type': 'post'
+        })
+        if not self.parent_app.is_processing_favorites_queue:
+            self.parent_app._process_next_favorite_download()
+        if hasattr(self.parent_app, 'switch_tab'):
+            self.parent_app.switch_tab("queue")
+
+    def _download_selected_posts(self):
+        selected_posts = self._get_selected_posts()
         if not selected_posts:
             QMessageBox.information(self, "No Selection", "Please select at least one post to download.")
             return
@@ -958,19 +1487,16 @@ class FavoritesTabWidget(QWidget):
             self.parent_app.log_signal.emit(f"Queuing {len(selected_posts)} favorite post(s) for download.")
 
         for post_data in selected_posts:
-            domain = self.parent_app._get_domain_for_service(post_data['service'], post_data.get('_source_api'))
-            direct_post_url = f"https://{domain}/{post_data['service']}/user/{str(post_data['creator_id'])}/post/{str(post_data['post_id'])}"
+            direct_post_url = self._get_post_url(post_data)
             self.parent_app.favorite_download_queue.append({
                 'url': direct_post_url,
-                'name': post_data['title'],
-                'name_for_folder': post_data.get('creator_name_resolved', post_data.get('creator_id', 'Unknown')),
+                'name': post_data.get('title') or f"Post #{post_data.get('post_id')}",
+                'name_for_folder': post_data.get('creator_name', post_data.get('creator_name_resolved', post_data.get('creator_id', 'Unknown'))),
                 'type': 'post'
             })
 
         if not self.parent_app.is_processing_favorites_queue:
             self.parent_app._process_next_favorite_download()
 
-        # Switch to Queue tab so user can see progress
         if hasattr(self.parent_app, 'switch_tab'):
             self.parent_app.switch_tab("queue")
-

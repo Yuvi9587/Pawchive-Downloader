@@ -397,82 +397,7 @@ CreatorAvatarManager = CreatorMediaManager
 #  User Favorites Manager (Persistent Local Bookmarks)
 # ─────────────────────────────────────────────────────────────────────────────
 
-class UserFavoritesManager(QObject):
-    """
-    Manages local user favorites for creators (persisted in cache/user_favorites.json).
-    Thread-safe and emits favorites_changed signal on any toggle.
-    """
-    favorites_changed = Signal()
-
-    def __init__(self, base_dir=".", parent=None):
-        super().__init__(parent)
-        self.file_path = os.path.join(base_dir, "cache", "user_favorites.json")
-        self._fav_keys = set()
-        self._fav_data = {}
-        self._load()
-
-    def _key(self, service: str, creator_id: str) -> str:
-        return f"{str(service or '').lower().strip()}:{str(creator_id or '').strip()}"
-
-    def is_favorite(self, service: str, creator_id: str) -> bool:
-        if not service or not creator_id:
-            return False
-        return self._key(service, creator_id) in self._fav_keys
-
-    def toggle(self, creator: dict) -> bool:
-        if not creator or not isinstance(creator, dict):
-            return False
-        svc = (creator.get("service") or "").lower().strip()
-        cid = str(creator.get("id") or "").strip()
-        if not svc or not cid:
-            return False
-        k = self._key(svc, cid)
-        if k in self._fav_keys:
-            self._fav_keys.remove(k)
-            self._fav_data.pop(k, None)
-            is_fav = False
-        else:
-            self._fav_keys.add(k)
-            self._fav_data[k] = {
-                "service": svc,
-                "id": cid,
-                "name": creator.get("name") or "Unknown",
-                "url": creator.get("url") or f"https://pawchive.pw/{svc}/user/{cid}",
-                "favorited": creator.get("favorited", 0),
-                "updated": creator.get("updated") or ""
-            }
-            is_fav = True
-        self._save()
-        self.favorites_changed.emit()
-        return is_fav
-
-    def get_all_keys(self) -> set:
-        return set(self._fav_keys)
-
-    def get_favorites_count(self) -> int:
-        return len(self._fav_keys)
-
-    def _load(self):
-        try:
-            if os.path.exists(self.file_path):
-                with open(self.file_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    if isinstance(data, dict):
-                        self._fav_data = data
-                        self._fav_keys = set(data.keys())
-                    elif isinstance(data, list):
-                        self._fav_keys = set(data)
-                        self._fav_data = {k: {} for k in data}
-        except Exception:
-            pass
-
-    def _save(self):
-        try:
-            os.makedirs(os.path.dirname(self.file_path), exist_ok=True)
-            with open(self.file_path, "w", encoding="utf-8") as f:
-                json.dump(self._fav_data, f, indent=2)
-        except Exception:
-            pass
+from ..core.favorites_manager import UserFavoritesManager
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -524,10 +449,11 @@ class CreatorCardDelegate(QStyledItemDelegate):
         self.scale = scale
         self.avatar_manager = avatar_manager
         self.fav_manager = fav_manager
+        self.card_w = int(220 * scale)
+        self.card_h = int(205 * scale)
 
     def sizeHint(self, option, index):
-        scale = self.scale
-        return QSize(int(220 * scale), int(205 * scale))
+        return QSize(getattr(self, "card_w", int(220 * self.scale)), getattr(self, "card_h", int(205 * self.scale)))
 
     def editorEvent(self, event, model, option, index):
         if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
@@ -1062,7 +988,11 @@ class CreatorsTabWidget(QWidget):
         self.grid_view.setResizeMode(QListView.ResizeMode.Adjust)  # Key: auto-reflow to monitor resolution!
         self.grid_view.setMovement(QListView.Movement.Static)
         self.grid_view.setUniformItemSizes(True)  # Blazing fast virtualization for 280k+ items
-        self.grid_view.setSpacing(int(8 * scale))
+        self.grid_view.setSpacing(0)
+        self.grid_view.setStyleSheet(
+            "QListView#CreatorsGrid { background-color: transparent; border: none; outline: none; } "
+            "QListView#CreatorsGrid::item { border: none; outline: none; padding: 0px; margin: 0px; }"
+        )
         self.grid_view.setMouseTracking(True)
         self.grid_view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
 
@@ -1212,6 +1142,23 @@ class CreatorsTabWidget(QWidget):
 
         root_layout.addLayout(bottom_bar)
 
+    def _adjust_grid_columns(self):
+        """Dynamically stretch grid columns to fill 100% of the viewport with zero dead gap."""
+        if not hasattr(self, "grid_view") or not hasattr(self, "card_delegate"):
+            return
+        vp_w = self.grid_view.viewport().width()
+        if vp_w <= 100:
+            return
+        scale = getattr(self, "scale", 1.0)
+        base_w = int(220 * scale)
+        base_h = int(205 * scale)
+        cols = max(1, vp_w // base_w)
+        slot_w = max(int(160 * scale), (vp_w - 2) // cols)
+        slot_h = int(slot_w * (base_h / base_w))
+        self.card_delegate.card_w = slot_w
+        self.card_delegate.card_h = slot_h
+        self.grid_view.setGridSize(QSize(slot_w, slot_h))
+
     def _init_table_header_width(self):
         if not getattr(self, "_table_header_initialized", False):
             th = self.table_view.horizontalHeader()
@@ -1224,11 +1171,13 @@ class CreatorsTabWidget(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
+        self._adjust_grid_columns()
         self._init_table_header_width()
         self._scroll_prune_timer.start()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self._adjust_grid_columns()
         self._scroll_prune_timer.start()
 
     def closeEvent(self, event):
@@ -1309,6 +1258,7 @@ class CreatorsTabWidget(QWidget):
 
     def on_tab_activated(self):
         """Called when user navigates back to Creators tab: re-renders visible viewport from disk cache."""
+        self._adjust_grid_columns()
         if hasattr(self, 'view_stack'):
             if self.view_stack.currentIndex() == 0:
                 self.grid_view.viewport().update()
@@ -1339,6 +1289,7 @@ class CreatorsTabWidget(QWidget):
             self.view_stack.setCurrentIndex(0)
             self.view_toggle_btn.setText("  Grid View")
             self.view_toggle_btn.setIcon(QIcon(get_asset_path("assets/Svg/folder.svg")))
+            self._adjust_grid_columns()
         self._scroll_prune_timer.start()
 
     def _load_initial_data(self):
@@ -1480,6 +1431,7 @@ class CreatorsTabWidget(QWidget):
         # 2. Populate models with the current 30 creators only
         self.grid_model.set_creators(page_creators)
         self.table_model.set_creators(page_creators)
+        self._adjust_grid_columns()
 
         # 3. Reset scroll position to top
         if hasattr(self, 'grid_view') and self.grid_view.verticalScrollBar():

@@ -334,14 +334,16 @@ class PostCardDelegate(QStyledItemDelegate):
     - Description excerpt (clean text, 2 lines max)
     - Creator name at the bottom
     """
-    def __init__(self, thumb_manager: PostThumbnailManager, scale: float = 1.0, parent=None):
+    def __init__(self, thumb_manager: PostThumbnailManager, fav_manager=None, scale: float = 1.0, parent=None):
         super().__init__(parent)
         self.thumb_manager = thumb_manager
+        self.fav_manager = fav_manager
         self.scale = scale
+        self.card_w = int(238 * scale)
+        self.card_h = int(278 * scale)
 
     def sizeHint(self, option, index):
-        scale = self.scale
-        return QSize(int(238 * scale), int(278 * scale))
+        return QSize(getattr(self, "card_w", int(238 * self.scale)), getattr(self, "card_h", int(278 * self.scale)))
 
     def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex):
         post = index.data(Qt.ItemDataRole.UserRole)
@@ -355,7 +357,7 @@ class PostCardDelegate(QStyledItemDelegate):
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
 
         scale = self.scale
-        r = QRectF(option.rect).adjusted(int(4 * scale), int(4 * scale), int(-4 * scale), int(-4 * scale))
+        r = QRectF(option.rect).adjusted(int(5 * scale), int(5 * scale), int(-5 * scale), int(-5 * scale))
         card_w = r.width()
         card_h = r.height()
         card_r = 10.0 * scale
@@ -449,6 +451,27 @@ class PostCardDelegate(QStyledItemDelegate):
                 painter.setFont(badge_font)
                 text_rect = QRectF(icon_x + icon_sz + int(4 * scale), b_rect.y(), text_w + int(4 * scale), badge_h)
                 painter.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, badge_text)
+
+        # Top-left: Local Favorite indicator star
+        svc = (post.get("_creator_service") or post.get("service") or "patreon").lower().strip()
+        cid = str(post.get("_creator_id") or post.get("user") or "").strip()
+        pid = str(post.get("id") or "").strip()
+        is_post_fav = False
+        if getattr(self, "fav_manager", None):
+            is_post_fav = self.fav_manager.is_favorite_post(svc, cid, pid)
+
+        if is_post_fav:
+            fav_sz = int(22 * scale)
+            fav_rect = QRectF(r.x() + int(8 * scale), r.y() + int(8 * scale), fav_sz, fav_sz)
+            painter.setPen(QPen(QColor(245, 158, 11, 220), 1.2))
+            painter.setBrush(QBrush(QColor(32, 22, 12, 210)))
+            painter.drawRoundedRect(fav_rect, 5 * scale, 5 * scale)
+
+            star_sz = int(12 * scale)
+            star_icon = QIcon(get_asset_path("assets/Svg/star.svg"))
+            star_x = fav_rect.x() + (fav_sz - star_sz) / 2
+            star_y = fav_rect.y() + (fav_sz - star_sz) / 2
+            painter.drawPixmap(int(star_x), int(star_y), star_icon.pixmap(star_sz, star_sz))
 
         # Top-right: Selection indicator
         sz = int(22 * scale)
@@ -1640,6 +1663,14 @@ class PostsTabWidget(QWidget):
         self._scroll_prune_timer.setInterval(120)
         self._scroll_prune_timer.timeout.connect(self._prune_offscreen_thumbnails)
 
+        # Local User Favorites Manager
+        self.fav_manager = getattr(self.parent_app, "favorites_manager", None)
+        if self.fav_manager:
+            try:
+                self.fav_manager.favorites_changed.connect(self._on_favorites_changed)
+            except Exception:
+                pass
+
         self._build_ui()
         self._load_local_creators_cache()
 
@@ -1885,14 +1916,14 @@ class PostsTabWidget(QWidget):
         self.grid_view.setViewMode(QListView.ViewMode.IconMode)
         self.grid_view.setResizeMode(QListView.ResizeMode.Adjust)
         self.grid_view.setMovement(QListView.Movement.Static)
-        self.grid_view.setSpacing(int(12 * scale))
+        self.grid_view.setSpacing(0)
         self.grid_view.setMouseTracking(True)
         self.grid_view.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.grid_view.setStyleSheet(
-            "QListView { background-color: #1A1C23; border: 1px solid #2B2E38; border-radius: 8px; padding: 6px; }"
-            "QListView::item { background: transparent; border: none; }"
+            "QListView { background-color: #1A1C23; border: 1px solid #2B2E38; border-radius: 8px; padding: 4px; }"
+            "QListView::item { background: transparent; border: none; outline: none; padding: 0px; margin: 0px; }"
         )
-        self.grid_delegate = PostCardDelegate(self.thumb_manager, scale=scale, parent=self.grid_view)
+        self.grid_delegate = PostCardDelegate(self.thumb_manager, fav_manager=self.fav_manager, scale=scale, parent=self.grid_view)
         self.grid_view.setItemDelegate(self.grid_delegate)
         self.grid_view.setModel(self.model)
         self.grid_view.clicked.connect(self._on_grid_card_clicked)
@@ -1980,8 +2011,26 @@ class PostsTabWidget(QWidget):
         if self.grid_view.selectionModel():
             self.grid_view.selectionModel().selectionChanged.connect(self._on_table_row_selection_changed)
 
+    def _adjust_grid_columns(self):
+        """Dynamically stretch post cards to fill 100% of the viewport with zero dead gap."""
+        if not hasattr(self, "grid_view") or not hasattr(self, "grid_delegate"):
+            return
+        vp_w = self.grid_view.viewport().width()
+        if vp_w <= 100:
+            return
+        scale = getattr(self, "scale", 1.0)
+        base_w = int(238 * scale)
+        cols = max(1, vp_w // base_w)
+        slot_w = max(int(180 * scale), (vp_w - 2) // cols)
+        thumb_h = int(slot_w * 10 / 16)
+        slot_h = thumb_h + int(130 * scale)
+        self.grid_delegate.card_w = slot_w
+        self.grid_delegate.card_h = slot_h
+        self.grid_view.setGridSize(QSize(slot_w, slot_h))
+
     def showEvent(self, event):
         super().showEvent(event)
+        self._adjust_grid_columns()
         if not getattr(self, "_header_initialized", False):
             th = self.table_view.horizontalHeader()
             vw = self.table_view.viewport().width()
@@ -1994,6 +2043,7 @@ class PostsTabWidget(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self._adjust_grid_columns()
         self._scroll_prune_timer.start()
 
     def _on_view_scrolled(self):
@@ -2070,6 +2120,7 @@ class PostsTabWidget(QWidget):
 
     def on_tab_activated(self):
         """Called when user navigates back to Posts tab: re-renders visible viewport from disk cache."""
+        self._adjust_grid_columns()
         if hasattr(self, "page_stack") and self.page_stack.currentIndex() == 0:
             if hasattr(self, "view_stack"):
                 if self.view_stack.currentIndex() == 0:
@@ -2260,6 +2311,7 @@ class PostsTabWidget(QWidget):
             self.view_stack.setCurrentIndex(0)
             self.view_toggle_btn.setText("  Table View")
             self.view_toggle_btn.setIcon(QIcon(get_asset_path("assets/Svg/doc.svg")))
+            self._adjust_grid_columns()
             self.grid_view.viewport().update()
         self._scroll_prune_timer.start()
 
@@ -2449,6 +2501,7 @@ class PostsTabWidget(QWidget):
         if success:
             self.current_offset = offset
             self.model.set_posts(posts, append=append)
+            self._adjust_grid_columns()
             if not append and offset == 0 and not self.current_search_query:
                 self._initial_posts = list(posts)
 
@@ -2576,6 +2629,7 @@ class PostsTabWidget(QWidget):
 
         if success:
             self.model.set_posts(posts, append=False)
+            self._adjust_grid_columns()
             count = len(posts)
             c_count = len(self.current_creators)
             if count == 0:
@@ -2699,7 +2753,22 @@ class PostsTabWidget(QWidget):
 
         play_act = menu.addAction(QIcon(get_asset_path("assets/uisvg/play.svg")), play_label)
         play_act.triggered.connect(lambda: self._open_post_detail(post))
+
+        rev_act = menu.addAction(QIcon(get_asset_path("assets/uisvg/clock.svg")), "View Post Revisions / History")
+        rev_act.triggered.connect(lambda: self._open_post_detail(post))
         menu.addSeparator()
+
+        fav_mgr = getattr(self, "fav_manager", None) or getattr(self.parent_app, "favorites_manager", None)
+        if fav_mgr:
+            svc = (post.get("_creator_service") or post.get("service") or "patreon").lower().strip()
+            cid = str(post.get("_creator_id") or post.get("user") or "").strip()
+            pid = str(post.get("id") or "").strip()
+            is_post_fav = fav_mgr.is_favorite_post(svc, cid, pid)
+
+            fav_label = "★ Remove from Local Favorites" if is_post_fav else "⭐ Add to Local Favorites"
+            fav_act = menu.addAction(QIcon(get_asset_path("assets/Svg/star.svg")), fav_label)
+            fav_act.triggered.connect(lambda _, p=post: self._toggle_post_favorite(p))
+            menu.addSeparator()
 
         send_act = menu.addAction(QIcon(get_asset_path("assets/Svg/download.svg")), "Send to Downloader")
         send_act.triggered.connect(self._on_send_to_downloader_clicked)
@@ -2723,6 +2792,17 @@ class PostsTabWidget(QWidget):
         )
 
         menu.exec(global_pos)
+
+    def _toggle_post_favorite(self, post: dict):
+        fav_mgr = getattr(self, "fav_manager", None) or getattr(self.parent_app, "favorites_manager", None)
+        if fav_mgr and post:
+            fav_mgr.toggle_post(post)
+
+    def _on_favorites_changed(self):
+        if hasattr(self, "grid_view"):
+            self.grid_view.viewport().update()
+        if hasattr(self, "table_view"):
+            self.table_view.viewport().update()
 
     def _open_post_detail(self, post: dict):
         """Transitions into the full dedicated in-app Post Detail view."""
@@ -2757,6 +2837,7 @@ class PostsTabWidget(QWidget):
                     self.detail_view.image_view.set_pixmap(QPixmap())
         if hasattr(self, "page_stack"):
             self.page_stack.setCurrentIndex(0)
+            self._adjust_grid_columns()
             if hasattr(self, "view_stack"):
                 if self.view_stack.currentIndex() == 0:
                     self.grid_view.viewport().update()

@@ -817,6 +817,10 @@ def setup_ui(main_app):
     main_app.queue_tab = QueueTabWidget(main_app, scale)
     main_app.content_stack.addWidget(main_app.queue_tab)      # Index 1: Queue
 
+    from ..core.favorites_manager import UserFavoritesManager
+    base_dir = getattr(main_app, "app_base_dir", ".")
+    main_app.favorites_manager = UserFavoritesManager(base_dir, parent=main_app)
+
     from ..ui.creators_tab import CreatorsTabWidget
     main_app.creators_tab = CreatorsTabWidget(main_app, scale)
     main_app.content_stack.addWidget(main_app.creators_tab)   # Index 2: Creators

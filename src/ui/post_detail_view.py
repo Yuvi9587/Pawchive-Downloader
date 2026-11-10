@@ -1,5 +1,7 @@
 import os
 import re
+import csv
+import io
 import html
 import json
 import hashlib
@@ -10,7 +12,7 @@ from urllib.parse import urlparse, unquote
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QScrollArea, QFrame, QTextBrowser, QStackedWidget, QProgressBar,
-    QSizePolicy, QApplication, QMessageBox, QGridLayout
+    QSizePolicy, QApplication, QMessageBox, QGridLayout, QComboBox
 )
 from PySide6.QtCore import (
     Qt, QSize, Signal, QThread, QUrl, QTimer, QRectF, QThreadPool,
@@ -118,6 +120,104 @@ class _PostDetailFetchWorker(QThread):
         except Exception as e:
             if not self._cancelled:
                 self.post_failed.emit(str(e))
+
+
+def parse_tags(raw) -> list:
+    """Parses tag strings, PostgreSQL array strings like '{tag1,\"tag 2\"}', or lists."""
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        return [str(t).strip() for t in raw if str(t).strip()]
+    if isinstance(raw, str):
+        raw = raw.strip()
+        if raw.startswith("{") and raw.endswith("}"):
+            raw = raw[1:-1]
+        try:
+            reader = csv.reader(io.StringIO(raw))
+            for row in reader:
+                return [t.strip().strip('"') for t in row if t.strip()]
+        except Exception:
+            return [t.strip().strip('"') for t in raw.split(",") if t.strip()]
+    return []
+
+
+class _PostRevisionsFetchWorker(QThread):
+    """
+    Fetches post revision history asynchronously from Pawchive API.
+    Endpoint: https://pawchive.pw/api/v1/{service}/{url_type}/{creator_id}/post/{post_id}/revisions
+    Caches results to cache/media_cache/revisions_{service}_{creator_id}_{post_id}.json
+    """
+    revisions_loaded = Signal(list)
+    revisions_failed = Signal(str)
+
+    def __init__(self, service: str, creator_id: str, post_id: str, cache_dir: str, parent=None):
+        super().__init__(parent)
+        self.service = (service or "patreon").lower().strip()
+        self.creator_id = str(creator_id or "").strip()
+        self.post_id = str(post_id or "").strip()
+        self.cache_dir = cache_dir
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+
+    def run(self):
+        if not self.creator_id or not self.post_id:
+            return
+
+        cache_file = os.path.join(
+            self.cache_dir, f"revisions_{self.service}_{self.creator_id}_{self.post_id}.json"
+        )
+
+        # 1. Local disk cache
+        if os.path.exists(cache_file):
+            try:
+                with open(cache_file, "r", encoding="utf-8") as f:
+                    cached_data = json.load(f)
+                    if isinstance(cached_data, list) and not self._cancelled:
+                        self.revisions_loaded.emit(cached_data)
+                        return
+            except Exception:
+                pass
+
+        if self._cancelled:
+            return
+
+        # 2. Network fetch
+        url_type = "server" if self.service == "discord" else "user"
+        api_url = f"https://pawchive.pw/api/v1/{self.service}/{url_type}/{self.creator_id}/post/{self.post_id}/revisions"
+
+        headers = {
+            "User-Agent": "PawchiveClient/1.0.5 (Desktop App)",
+            "Accept": "application/json",
+            "Referer": "https://pawchive.pw/"
+        }
+
+        try:
+            resp = requests.get(api_url, headers=headers, timeout=12)
+            if self._cancelled:
+                return
+
+            if resp.status_code == 200:
+                data = resp.json()
+                if isinstance(data, list) and not self._cancelled:
+                    try:
+                        os.makedirs(self.cache_dir, exist_ok=True)
+                        with open(cache_file, "w", encoding="utf-8") as f:
+                            json.dump(data, f, ensure_ascii=False)
+                    except Exception:
+                        pass
+                    self.revisions_loaded.emit(data)
+            elif resp.status_code == 404:
+                # 404 means no revisions exist for this post
+                if not self._cancelled:
+                    self.revisions_loaded.emit([])
+            else:
+                if not self._cancelled:
+                    self.revisions_failed.emit(f"HTTP {resp.status_code}")
+        except Exception as e:
+            if not self._cancelled:
+                self.revisions_failed.emit(str(e))
 
 
 class _ThumbTaskSignals(QObject):
@@ -537,22 +637,29 @@ def format_comment_time(pub) -> str:
         return str(pub)[:10] if len(str(pub)) >= 10 else str(pub)
 
 
+_COMMENT_USER_PIXMAP_CACHE = {}
+def _get_comment_user_pixmap(scale: float) -> QPixmap:
+    sz = int(14 * scale)
+    if sz not in _COMMENT_USER_PIXMAP_CACHE:
+        _COMMENT_USER_PIXMAP_CACHE[sz] = QIcon(get_asset_path("assets/Svg/user.svg")).pixmap(sz, sz)
+    return _COMMENT_USER_PIXMAP_CACHE[sz]
+
+_COMMENT_URL_REGEX = re.compile(r'(https?://[^\s<>"]+)')
+
+
 class CommentCardWidget(QFrame):
     """Clean dark card representing a single comment or threaded reply."""
-    def __init__(self, comment: dict, scale: float = 1.0, parent=None):
+    def __init__(self, comment: dict, is_reply: bool = None, scale: float = 1.0, parent=None):
         super().__init__(parent)
         self.scale = scale
         self.comment = comment
 
-        is_reply = bool(comment.get("parent_id"))
+        if is_reply is None:
+            is_reply = bool(comment.get("parent_id"))
 
         self.setObjectName("commentCard")
+        self.setProperty("is_reply", "true" if is_reply else "false")
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
-        self.setStyleSheet(
-            f"QFrame#commentCard {{ background-color: {'#1D2028' if is_reply else '#161820'}; "
-            f"border: 1px solid {'#353B4A' if is_reply else '#272A34'}; "
-            f"border-radius: 8px; {'border-left: 3px solid #E5A198; margin-left: 18px;' if is_reply else ''} }}"
-        )
 
         layout = QVBoxLayout(self)
         pad_x = int(12 * scale)
@@ -565,13 +672,13 @@ class CommentCardWidget(QFrame):
         header_row.setSpacing(int(8 * scale))
 
         user_icon = QLabel()
-        user_icon.setPixmap(QIcon(get_asset_path("assets/Svg/user.svg")).pixmap(int(14 * scale), int(14 * scale)))
-        user_icon.setStyleSheet("border: none; background: transparent;")
+        user_icon.setObjectName("commentUserIcon")
+        user_icon.setPixmap(_get_comment_user_pixmap(scale))
         header_row.addWidget(user_icon)
 
         c_name = comment.get("commenter_name") or comment.get("commenter") or "Anonymous"
         name_lbl = QLabel(f"<b>{html.escape(c_name)}</b>")
-        name_lbl.setStyleSheet("color: #FFFFFF; font-size: 8.5pt; border: none; background: transparent;")
+        name_lbl.setObjectName("commentNameLbl")
         header_row.addWidget(name_lbl)
 
         # Published date
@@ -579,15 +686,12 @@ class CommentCardWidget(QFrame):
         time_str = format_comment_time(pub) if pub else ""
         if time_str:
             time_lbl = QLabel(f"•  {time_str}")
-            time_lbl.setStyleSheet("color: #8C929E; font-size: 8pt; border: none; background: transparent;")
+            time_lbl.setObjectName("commentTimeLbl")
             header_row.addWidget(time_lbl)
 
         if is_reply:
             reply_badge = QLabel("Reply")
-            reply_badge.setStyleSheet(
-                "background-color: #2F2424; color: #E5A198; font-size: 7.5pt; "
-                "font-weight: bold; padding: 1px 6px; border-radius: 3px; border: 1px solid #5A3535;"
-            )
+            reply_badge.setObjectName("commentReplyBadge")
             header_row.addWidget(reply_badge)
 
         header_row.addStretch(1)
@@ -596,7 +700,7 @@ class CommentCardWidget(QFrame):
         revs = comment.get("revisions") or []
         if len(revs) > 1:
             rev_lbl = QLabel(f"{len(revs)} edits")
-            rev_lbl.setStyleSheet("color: #6C7280; font-size: 7.5pt; border: none; background: transparent;")
+            rev_lbl.setObjectName("commentRevLbl")
             header_row.addWidget(rev_lbl)
 
         layout.addLayout(header_row)
@@ -604,20 +708,16 @@ class CommentCardWidget(QFrame):
         # Content text (Word-wrapped QLabel: auto-fits exact text height with zero wasted space)
         raw_content = comment.get("content") or ""
         escaped = html.escape(raw_content)
-        url_pattern = re.compile(r'(https?://[^\s<>"]+)')
-        linkified = url_pattern.sub(r'<a href="\1" style="color: #E5A198; text-decoration: underline;">\1</a>', escaped)
+        linkified = _COMMENT_URL_REGEX.sub(r'<a href="\1" style="color: #E5A198; text-decoration: underline;">\1</a>', escaped)
         clean_content = linkified.replace("\n", "<br>")
 
         self.content_lbl = QLabel(clean_content, self)
+        self.content_lbl.setObjectName("commentContentLbl")
         self.content_lbl.setWordWrap(True)
         self.content_lbl.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.LinksAccessibleByMouse
         )
         self.content_lbl.setOpenExternalLinks(True)
-        self.content_lbl.setStyleSheet(
-            "color: #DFE1E5; font-size: 8.5pt; line-height: 1.45; font-family: Segoe UI, sans-serif; "
-            "border: none; background: transparent; padding: 0px;"
-        )
         layout.addWidget(self.content_lbl)
 
 
@@ -658,8 +758,20 @@ class PostDetailView(QWidget):
         self.comments_worker = None
         self.stream_worker = None
         self.post_worker = None
+        self.revisions_worker = None
         self.batch_hd_worker = None
         self._loaded_full_res_indices = set()
+        self.revisions_data = []
+        self.original_full_post = {}
+        self.original_media_items = []
+        self.is_viewing_revision = False
+
+        # Comment pagination / lazy rendering state
+        self._all_loaded_comments = []
+        self._rendered_comments_count = 0
+        self.comments_load_more_frame = None
+        self.comments_load_more_btn = None
+        self.comments_load_all_btn = None
 
         # Thumbnail task signals for carousel & gallery cards
         self._thumb_generation = 0
@@ -669,6 +781,13 @@ class PostDetailView(QWidget):
         if self.media_manager:
             try:
                 self.media_manager.media_loaded.connect(self._on_avatar_loaded)
+            except Exception:
+                pass
+
+        self.fav_manager = getattr(parent_app, "favorites_manager", None)
+        if self.fav_manager:
+            try:
+                self.fav_manager.favorites_changed.connect(self._update_favorite_button)
             except Exception:
                 pass
 
@@ -755,6 +874,16 @@ class PostDetailView(QWidget):
         self.open_browser_btn.clicked.connect(self._open_in_browser)
         top_layout.addWidget(self.open_browser_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
+        # Local Favorite Post button (no cookies or login required)
+        self.fav_post_btn = QPushButton("  Favorite")
+        self.fav_post_btn.setIcon(QIcon(get_asset_path("assets/uisvg/heart.svg")))
+        self.fav_post_btn.setIconSize(QSize(int(13 * scale), int(13 * scale)))
+        self.fav_post_btn.setFixedHeight(btn_h)
+        self.fav_post_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.fav_post_btn.setToolTip("Save this post to your local favorites (stored on this PC, no login needed)")
+        self.fav_post_btn.clicked.connect(self._toggle_favorite_post)
+        top_layout.addWidget(self.fav_post_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+
         self.send_to_dl_btn = QPushButton("  Send to Downloader")
         self.send_to_dl_btn.setIcon(QIcon(get_asset_path("assets/Svg/download.svg")))
         self.send_to_dl_btn.setIconSize(QSize(int(13 * scale), int(13 * scale)))
@@ -815,7 +944,7 @@ class PostDetailView(QWidget):
         h_layout.setContentsMargins(int(16 * scale), int(12 * scale), int(16 * scale), int(12 * scale))
         h_layout.setSpacing(int(6 * scale))
 
-        # Badges row: Platform Pill + Date + Edited
+        # Badges row: Platform Pill + Date + Edited + Revisions Selector
         meta_row = QHBoxLayout()
         meta_row.setSpacing(int(10 * scale))
 
@@ -830,7 +959,53 @@ class PostDetailView(QWidget):
         self.date_lbl.setStyleSheet("color: #8C929E; font-size: 8pt; border: none; background: transparent;")
         meta_row.addWidget(self.date_lbl)
 
+        self.edited_lbl = QLabel("")
+        self.edited_lbl.setStyleSheet("color: #8C929E; font-size: 8pt; border: none; background: transparent;")
+        self.edited_lbl.setVisible(False)
+        meta_row.addWidget(self.edited_lbl)
+
         meta_row.addStretch(1)
+
+        self.rev_lbl = QLabel("Imported:")
+        self.rev_lbl.setStyleSheet("color: #8C929E; font-size: 8pt; font-weight: bold; border: none; background: transparent;")
+        meta_row.addWidget(self.rev_lbl)
+
+        self.revision_combo = QComboBox()
+        self.revision_combo.setFixedHeight(int(24 * scale))
+        self.revision_combo.setMinimumWidth(int(190 * scale))
+        self.revision_combo.setStyleSheet(f"""
+            QComboBox {{
+                background-color: #222530;
+                color: #DFE1E5;
+                border: 1px solid #363A48;
+                border-radius: 4px;
+                padding: 2px 10px 2px 8px;
+                font-size: 8pt;
+                font-family: 'Segoe UI', sans-serif;
+            }}
+            QComboBox:hover {{
+                border-color: #E5A198;
+                background-color: #282B36;
+            }}
+            QComboBox::drop-down {{
+                border: none;
+                width: 16px;
+            }}
+            QComboBox QAbstractItemView {{
+                background-color: #1E2028;
+                color: #DFE1E5;
+                border: 1px solid #363A48;
+                selection-background-color: #3D2628;
+                selection-color: #E5A198;
+                outline: none;
+                padding: 4px;
+            }}
+        """)
+        self.revision_combo.addItem("Checking revisions...")
+        self.revision_combo.setEnabled(False)
+        self.revision_combo.currentIndexChanged.connect(self._on_revision_selected)
+        meta_row.addWidget(self.revision_combo)
+
         h_layout.addLayout(meta_row)
 
         # Big Post Title
@@ -856,6 +1031,54 @@ class PostDetailView(QWidget):
 
         creator_row.addStretch(1)
         h_layout.addLayout(creator_row)
+
+        # Tags row
+        self.tags_frame = QFrame()
+        self.tags_frame.setStyleSheet("background: transparent; border: none;")
+        self.tags_layout = QHBoxLayout(self.tags_frame)
+        self.tags_layout.setContentsMargins(0, 0, 0, 0)
+        self.tags_layout.setSpacing(int(6 * scale))
+        self.tags_frame.setVisible(False)
+        h_layout.addWidget(self.tags_frame)
+
+        # Revision Notice Banner (visible when viewing a non-current revision)
+        self.revision_notice_frame = QFrame()
+        self.revision_notice_frame.setStyleSheet(
+            "QFrame { background-color: #27201D; border: 1px solid #734538; border-radius: 6px; padding: 4px 8px; }"
+        )
+        rn_layout = QHBoxLayout(self.revision_notice_frame)
+        rn_layout.setContentsMargins(int(8 * scale), int(6 * scale), int(8 * scale), int(6 * scale))
+        rn_layout.setSpacing(int(8 * scale))
+
+        self.revision_notice_lbl = QLabel("")
+        self.revision_notice_lbl.setStyleSheet("color: #F0B3AB; font-size: 8.5pt; font-weight: normal; border: none; background: transparent;")
+        self.revision_notice_lbl.setWordWrap(True)
+        rn_layout.addWidget(self.revision_notice_lbl, 1)
+
+        self.dl_rev_files_btn = QPushButton("  Download Revision Files")
+        self.dl_rev_files_btn.setIcon(QIcon(get_asset_path("assets/Svg/download.svg")))
+        self.dl_rev_files_btn.setIconSize(QSize(int(11 * scale), int(11 * scale)))
+        self.dl_rev_files_btn.setFixedHeight(int(24 * scale))
+        self.dl_rev_files_btn.setStyleSheet(
+            "QPushButton { background-color: #3D2625; color: #E5A198; border: 1px solid #734538; border-radius: 4px; font-size: 8pt; font-weight: bold; padding: 2px 8px; }"
+            "QPushButton:hover { background-color: #52312F; color: #FFFFFF; border-color: #E5A198; }"
+        )
+        self.dl_rev_files_btn.clicked.connect(self._download_all_revision_files)
+        rn_layout.addWidget(self.dl_rev_files_btn)
+
+        self.restore_latest_btn = QPushButton("  Back to Latest")
+        self.restore_latest_btn.setIcon(QIcon(get_asset_path("assets/Svg/previous.svg")))
+        self.restore_latest_btn.setIconSize(QSize(int(10 * scale), int(10 * scale)))
+        self.restore_latest_btn.setFixedHeight(int(24 * scale))
+        self.restore_latest_btn.setStyleSheet(
+            "QPushButton { background-color: #2A2E38; color: #DFE1E5; border: 1px solid #383D48; border-radius: 4px; font-size: 8pt; font-weight: bold; padding: 2px 8px; }"
+            "QPushButton:hover { background-color: #383D48; color: #FFFFFF; }"
+        )
+        self.restore_latest_btn.clicked.connect(self._restore_latest_post)
+        rn_layout.addWidget(self.restore_latest_btn)
+
+        self.revision_notice_frame.setVisible(False)
+        h_layout.addWidget(self.revision_notice_frame)
 
         self.content_layout.addWidget(self.header_card)
 
@@ -1160,7 +1383,63 @@ class PostDetailView(QWidget):
 
         # Container for loaded comment cards
         self.comments_container = QWidget()
-        self.comments_container.setStyleSheet("background: transparent;")
+        self.comments_container.setStyleSheet("""
+            QWidget {
+                background: transparent;
+            }
+            QFrame#commentCard {
+                background-color: #161820;
+                border: 1px solid #272A34;
+                border-radius: 8px;
+            }
+            QFrame#commentCard[is_reply="true"] {
+                background-color: #1D2028;
+                border: 1px solid #353B4A;
+                border-left: 3px solid #E5A198;
+                border-radius: 8px;
+                margin-left: 18px;
+            }
+            QLabel#commentUserIcon {
+                border: none;
+                background: transparent;
+            }
+            QLabel#commentNameLbl {
+                color: #FFFFFF;
+                font-size: 8.5pt;
+                border: none;
+                background: transparent;
+            }
+            QLabel#commentTimeLbl {
+                color: #8C929E;
+                font-size: 8pt;
+                border: none;
+                background: transparent;
+            }
+            QLabel#commentReplyBadge {
+                background-color: #2F2424;
+                color: #E5A198;
+                font-size: 7.5pt;
+                font-weight: bold;
+                padding: 1px 6px;
+                border-radius: 3px;
+                border: 1px solid #5A3535;
+            }
+            QLabel#commentRevLbl {
+                color: #6C7280;
+                font-size: 7.5pt;
+                border: none;
+                background: transparent;
+            }
+            QLabel#commentContentLbl {
+                color: #DFE1E5;
+                font-size: 8.5pt;
+                line-height: 1.45;
+                font-family: Segoe UI, sans-serif;
+                border: none;
+                background: transparent;
+                padding: 0px;
+            }
+        """)
         self.comments_list_layout = QVBoxLayout(self.comments_container)
         self.comments_list_layout.setContentsMargins(0, 0, 0, 0)
         self.comments_list_layout.setSpacing(int(6 * scale))
@@ -1262,7 +1541,7 @@ class PostDetailView(QWidget):
         root_v.addWidget(self.body_container, 1)
 
     # ─────────────────────────────────────────────────────────────────────────
-    #  Loading Post Data
+    #  Loading Post Data & Revisions
     # ─────────────────────────────────────────────────────────────────────────
 
     def load_post(self, post: dict, all_posts: list = None):
@@ -1271,10 +1550,32 @@ class PostDetailView(QWidget):
         self._loaded_full_res_indices = set()
         if hasattr(self, "batch_hd_worker") and self.batch_hd_worker and self.batch_hd_worker.isRunning():
             self.batch_hd_worker.cancel()
-            self.batch_hd_worker.wait(300)
         self.batch_hd_worker = None
+
         self.post = post or {}
         self.all_posts = all_posts or []
+        self.original_full_post = dict(self.post)
+        self.is_viewing_revision = False
+        self.revisions_data = []
+
+        if hasattr(self, "revisions_worker") and self.revisions_worker and self.revisions_worker.isRunning():
+            self.revisions_worker.cancel()
+            try:
+                self.revisions_worker.revisions_loaded.disconnect()
+                self.revisions_worker.revisions_failed.disconnect()
+            except Exception:
+                pass
+        self.revisions_worker = None
+
+        if hasattr(self, "revision_combo"):
+            self.revision_combo.blockSignals(True)
+            self.revision_combo.clear()
+            self.revision_combo.addItem("Checking revisions...")
+            self.revision_combo.setEnabled(False)
+            self.revision_combo.blockSignals(False)
+
+        if hasattr(self, "revision_notice_frame"):
+            self.revision_notice_frame.setVisible(False)
 
         # Find index in post list to handle prev/next navigation
         pid = str(self.post.get("id") or "")
@@ -1289,40 +1590,95 @@ class PostDetailView(QWidget):
             0 <= self.current_post_index < len(self.all_posts) - 1
         )
 
+        # Apply post data to UI view
+        self._apply_post_data_to_view(self.post, is_revision=False)
+        self.original_media_items = list(self.media_items)
+
+        # Comments
+        self._fetch_comments()
+
+        # Asynchronously fetch full post detail
+        if self.post_worker and self.post_worker.isRunning():
+            self.post_worker.cancel()
+            try:
+                self.post_worker.post_loaded.disconnect()
+            except Exception:
+                pass
+
+        svc = (
+            self.post.get("_creator_service")
+            or self.post.get("service")
+            or "patreon"
+        ).lower().strip()
+        cid = str(self.post.get("_creator_id") or self.post.get("user") or "").strip()
+        if svc and cid and pid:
+            self.post_worker = _PostDetailFetchWorker(svc, cid, pid, self.cache_dir, self)
+            self.post_worker.post_loaded.connect(self._on_full_post_loaded)
+            self.post_worker.start()
+
+            # Asynchronously fetch revision history
+            self.revisions_worker = _PostRevisionsFetchWorker(svc, cid, pid, self.cache_dir, self)
+            self.revisions_worker.revisions_loaded.connect(self._on_revisions_loaded)
+            self.revisions_worker.revisions_failed.connect(self._on_revisions_failed)
+            self.revisions_worker.start()
+
+        # Scroll to top
+        self.scroll_area.verticalScrollBar().setValue(0)
+
+    def _apply_post_data_to_view(self, post_data: dict, is_revision: bool = False):
+        """Applies title, dates, tags, description, and media items for current post or revision."""
+        pid = str(post_data.get("id") or "")
+
         # 1. Title & Header
-        title = self.post.get("title") or f"Post #{pid}"
+        title = post_data.get("title") or f"Post #{pid}"
         self.title_lbl.setText(title)
 
         # Platform Pill
         svc = (
-            self.post.get("_creator_service")
-            or self.post.get("service")
+            post_data.get("_creator_service")
+            or post_data.get("service")
             or "patreon"
         ).lower().strip()
         svc_names = {"patreon": "Patreon", "fanbox": "Pixiv Fanbox", "discord": "Discord"}
         self.platform_pill.setText(svc_names.get(svc, svc.capitalize()))
 
         # Published date
-        pub = self.post.get("published") or self.post.get("added")
+        pub = post_data.get("published") or post_data.get("added")
         if pub:
             clean_date = str(pub).replace("T", " ").split(".")[0]
-            try:
-                dt = datetime.fromisoformat(clean_date)
-                date_text = f"<img src='{get_asset_html_path('assets/uisvg/clock.svg')}' width='11' height='11'> &nbsp;{dt.day} {dt.strftime('%b %Y')}"
-            except Exception:
-                date_text = f"<img src='{get_asset_html_path('assets/uisvg/clock.svg')}' width='11' height='11'> &nbsp;{clean_date[:10]}"
+            self.date_lbl.setText(
+                f"<img src='{get_asset_html_path('assets/uisvg/clock.svg')}' width='11' height='11'> &nbsp;Published: {clean_date}"
+            )
         else:
-            date_text = f"<img src='{get_asset_html_path('assets/uisvg/clock.svg')}' width='11' height='11'> &nbsp;Unknown Date"
-        self.date_lbl.setText(date_text)
+            self.date_lbl.setText(
+                f"<img src='{get_asset_html_path('assets/uisvg/clock.svg')}' width='11' height='11'> &nbsp;Published: Unknown Date"
+            )
+
+        # Edited date
+        edited = post_data.get("edited")
+        if edited:
+            clean_edited = str(edited).replace("T", " ").split(".")[0]
+            self.edited_lbl.setText(
+                f"<img src='{get_asset_html_path('assets/uisvg/clock.svg')}' width='11' height='11'> &nbsp;Edited: {clean_edited}"
+            )
+            self.edited_lbl.setVisible(True)
+        else:
+            self.edited_lbl.setVisible(False)
+
+        # Tags
+        self._update_tags(post_data.get("tags"))
 
         # Creator Info
-        cname = self.post.get("_creator_name") or "Creator"
+        cname = post_data.get("_creator_name") or "Creator"
         self.creator_name_lbl.setText(cname)
-        cid = str(self.post.get("_creator_id") or self.post.get("user") or "").strip()
+        cid = str(post_data.get("_creator_id") or post_data.get("user") or "").strip()
         self._update_avatar(svc, cid)
 
+        # Update Favorite Button
+        self._update_favorite_button()
+
         # 2. Description
-        content = (self.post.get("content") or "").strip()
+        content = (post_data.get("content") or "").strip()
         if content:
             self.desc_card.setVisible(True)
             self.desc_browser.setHtml(
@@ -1336,7 +1692,7 @@ class PostDetailView(QWidget):
             self.desc_card.setVisible(False)
 
         # 3. Extract and load media
-        self.media_items = extract_media_items_from_post(self.post)
+        self.media_items = extract_media_items_from_post(post_data)
         self.current_media_index = 0
 
         # Clear generic attachments list
@@ -1368,22 +1724,191 @@ class PostDetailView(QWidget):
                 if att["kind"] in ("file", "audio"):
                     self._add_attachment_download_row(att)
 
-        # 4. Comments
-        self._fetch_comments()
+    def _update_tags(self, raw_tags):
+        """Displays small rounded tag pills matching Pawchive website tags."""
+        while self.tags_layout.count():
+            item = self.tags_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
 
-        # 5. Asynchronously fetch full post detail (handles Kemono/Pawchive truncated attachments)
-        if self.post_worker and self.post_worker.isRunning():
-            self.post_worker.cancel()
-            self.post_worker.wait(300)
+        tags = parse_tags(raw_tags)
+        if not tags:
+            self.tags_frame.setVisible(False)
+            return
 
-        cid = str(self.post.get("_creator_id") or self.post.get("user") or "").strip()
-        if svc and cid and pid:
-            self.post_worker = _PostDetailFetchWorker(svc, cid, pid, self.cache_dir, self)
-            self.post_worker.post_loaded.connect(self._on_full_post_loaded)
-            self.post_worker.start()
+        self.tags_frame.setVisible(True)
+        lbl = QLabel("Tags:")
+        lbl.setStyleSheet("color: #8C929E; font-size: 8pt; font-weight: bold; border: none; background: transparent;")
+        self.tags_layout.addWidget(lbl)
 
-        # Scroll to top
-        self.scroll_area.verticalScrollBar().setValue(0)
+        for tag in tags[:12]:
+            tag_lbl = QLabel(tag)
+            tag_lbl.setStyleSheet(
+                "background-color: #242730; color: #DFE1E5; border: 1px solid #363A45; "
+                "border-radius: 4px; padding: 2px 7px; font-size: 7.5pt; font-weight: bold;"
+            )
+            self.tags_layout.addWidget(tag_lbl)
+
+        if len(tags) > 12:
+            more_lbl = QLabel(f"+{len(tags) - 12} more")
+            more_lbl.setStyleSheet("color: #8C929E; font-size: 7.5pt; font-style: italic;")
+            self.tags_layout.addWidget(more_lbl)
+
+        self.tags_layout.addStretch(1)
+
+    def _on_revisions_loaded(self, revs: list):
+        """Populates revision / snapshot combo box when background API fetch succeeds."""
+        if not self.post:
+            return
+        self.revisions_data = revs or []
+        self.revision_combo.blockSignals(True)
+        self.revision_combo.clear()
+
+        pub_or_add = (
+            self.original_full_post.get("added")
+            or self.original_full_post.get("edited")
+            or self.original_full_post.get("published")
+            or ""
+        )
+        cur_date = str(pub_or_add)[:7] if pub_or_add else "Latest"
+
+        total_revs = len(self.revisions_data)
+        if total_revs > 0:
+            self.revision_combo.addItem(f"{cur_date} <{total_revs + 1}> [current]")
+            for idx, rev in enumerate(self.revisions_data):
+                rev_num = total_revs - idx
+                rev_id = str(rev.get("revision_id") or "")
+                rev_date_raw = rev.get("added") or rev.get("edited") or rev.get("published") or ""
+                rev_date = str(rev_date_raw)[:7] if rev_date_raw else "Rev"
+                label = f"{rev_date} <{rev_num}> [{rev_id}]" if rev_id else f"{rev_date} <{rev_num}>"
+                self.revision_combo.addItem(label)
+            self.revision_combo.setEnabled(True)
+        else:
+            self.revision_combo.addItem(f"{cur_date} [current] (No edits)")
+            self.revision_combo.setEnabled(False)
+
+        self.revision_combo.setCurrentIndex(0)
+        self.revision_combo.blockSignals(False)
+
+    def _on_revisions_failed(self, error: str):
+        """Gracefully handle revision fetch errors or offline state."""
+        if not hasattr(self, "revision_combo"):
+            return
+        if getattr(self, "revisions_data", None):
+            return
+        self.revision_combo.blockSignals(True)
+        self.revision_combo.clear()
+        pub_or_add = (
+            self.original_full_post.get("added")
+            or self.original_full_post.get("edited")
+            or self.original_full_post.get("published")
+            or ""
+        )
+        cur_date = str(pub_or_add)[:7] if pub_or_add else "Latest"
+        self.revision_combo.addItem(f"{cur_date} [current]")
+        self.revision_combo.setEnabled(False)
+        self.revision_combo.blockSignals(False)
+
+    def _on_revision_selected(self, index: int):
+        """User changed selected post revision from the dropdown."""
+        if index < 0:
+            return
+
+        if index == 0:
+            # Restore latest / current post
+            self.is_viewing_revision = False
+            self.revision_notice_frame.setVisible(False)
+            self.post = dict(self.original_full_post)
+            self._apply_post_data_to_view(self.post, is_revision=False)
+            self.nav_status_lbl.setText("Showing latest post")
+            QTimer.singleShot(1500, lambda: self.nav_status_lbl.setText(""))
+        elif 0 < index <= len(self.revisions_data):
+            # View historical snapshot
+            self.is_viewing_revision = True
+            rev = self.revisions_data[index - 1]
+            rev_num = len(self.revisions_data) - (index - 1)
+            rev_id = str(rev.get("revision_id") or "")
+
+            rev_post = dict(self.original_full_post)
+            rev_post.update({
+                "title": rev.get("title") or self.original_full_post.get("title"),
+                "content": rev.get("content") or "",
+                "file": rev.get("file"),
+                "attachments": rev.get("attachments") or [],
+                "embed": rev.get("embed") or {},
+                "tags": rev.get("tags") or self.original_full_post.get("tags"),
+                "published": rev.get("published") or self.original_full_post.get("published"),
+                "edited": rev.get("edited") or self.original_full_post.get("edited"),
+                "added": rev.get("added") or self.original_full_post.get("added"),
+                "revision_id": rev_id,
+                "_is_revision": True,
+            })
+
+            ed_date = rev.get("edited") or rev.get("added") or rev.get("published") or "Unknown"
+            clean_ed = str(ed_date).replace("T", " ").split(".")[0]
+
+            rev_items = extract_media_items_from_post(rev_post)
+            orig_items = getattr(self, "original_media_items", [])
+            diff_note = ""
+            if len(rev_items) != len(orig_items):
+                diff_note = f" • Media items in snapshot: {len(rev_items)} (latest: {len(orig_items)})"
+
+            self.revision_notice_lbl.setText(
+                f"<b>Viewing Revision &lt;{rev_num}&gt; [{rev_id}]</b> • Snapshot from {clean_ed}{diff_note}. "
+                f"You can view historical descriptions or download removed files from this version."
+            )
+            self.revision_notice_frame.setVisible(True)
+            self.post = rev_post
+            self._apply_post_data_to_view(self.post, is_revision=True)
+            self.nav_status_lbl.setText(f"Loaded Revision <{rev_num}>")
+            QTimer.singleShot(1500, lambda: self.nav_status_lbl.setText(""))
+
+    def _restore_latest_post(self):
+        """Returns to the latest version of the post."""
+        if hasattr(self, "revision_combo"):
+            self.revision_combo.setCurrentIndex(0)
+
+    def _download_all_revision_files(self):
+        """Sends all media items/attachments in the currently viewed revision to the downloader queue."""
+        if not self.media_items:
+            self.nav_status_lbl.setText("No files in this revision")
+            QTimer.singleShot(2000, lambda: self.nav_status_lbl.setText(""))
+            return
+
+        cname = self.post.get("_creator_name") or "Creator"
+        queued_count = 0
+        if hasattr(self.parent_app, "favorite_download_queue"):
+            for att in self.media_items:
+                url = att.get("url")
+                name = att.get("name") or "file"
+                if url:
+                    queue_item = {
+                        "url": url,
+                        "name": f"[{cname}] {name}",
+                        "filename": name,
+                        "name_for_folder": cname,
+                        "creator_name": cname,
+                        "type": "direct_file",
+                        "force_artist_folder": True,
+                        "post_title": self.post.get("title") or "",
+                        "post_id": str(self.post.get("id") or ""),
+                        "fallback_urls": att.get("fallback_urls") or []
+                    }
+                    self.parent_app.favorite_download_queue.append(queue_item)
+                    queued_count += 1
+            if queued_count > 0:
+                if hasattr(self.parent_app, "_process_next_favorite_download"):
+                    if not getattr(self.parent_app, "is_processing_favorites_queue", False):
+                        self.parent_app._process_next_favorite_download()
+                self.nav_status_lbl.setText(f"Queued {queued_count} file(s) from revision!")
+                QTimer.singleShot(2500, lambda: self.nav_status_lbl.setText(""))
+                if hasattr(self.parent_app, "log_signal"):
+                    self.parent_app.log_signal.emit(
+                        f"PostDetail: Queued {queued_count} file(s) from revision '{self.post.get('title')}'"
+                    )
+        else:
+            self.nav_status_lbl.setText(f"Found {len(self.media_items)} file(s)")
+            QTimer.singleShot(2000, lambda: self.nav_status_lbl.setText(""))
 
     def _update_avatar(self, svc: str, cid: str):
         sz = int(28 * self.scale)
@@ -1685,53 +2210,19 @@ class PostDetailView(QWidget):
                 QTimer.singleShot(1500, lambda: self.media_dl_curr_btn.setText("  Download File"))
 
     def _on_full_post_loaded(self, full_post: dict):
-        if not full_post or not self.post:
+        if not full_post or not self.original_full_post:
             return
-        if str(full_post.get("id")) != str(self.post.get("id")):
+        if str(full_post.get("id")) != str(self.original_full_post.get("id")):
             return
-
-        new_attachments = full_post.get("attachments") or []
-        old_attachments = self.post.get("attachments") or []
-        new_content = full_post.get("content") or ""
-        old_content = self.post.get("content") or ""
-
-        changed = (len(new_attachments) != len(old_attachments)) or (len(new_content) != len(old_content))
 
         for k, v in full_post.items():
-            if v or k not in self.post:
-                self.post[k] = v
+            if v or k not in self.original_full_post:
+                self.original_full_post[k] = v
 
-        if changed:
-            if len(new_content) != len(old_content):
-                c = new_content.strip()
-                if c:
-                    self.desc_card.setVisible(True)
-                    self.desc_browser.setHtml(
-                        f"<div style='color: #DFE1E5; font-size: 9.5pt; line-height: 1.5; font-family: Segoe UI, sans-serif;'>"
-                        f"{c}"
-                        f"</div>"
-                    )
-                    self._update_desc_height()
-                    QTimer.singleShot(20, self._update_desc_height)
-                else:
-                    self.desc_card.setVisible(False)
-
-            updated_items = extract_media_items_from_post(self.post)
-            if len(updated_items) != len(self.media_items):
-                self.media_items = updated_items
-                count = len(self.media_items)
-                self.media_card.setVisible(True)
-                self.sidebar_frame.setVisible(self.is_sidebar_visible)
-                self.toggle_sidebar_btn.setVisible(True)
-                self.media_sec_lbl.setText(
-                    f"MEDIA & ATTACHMENTS ({count} {'ITEM' if count == 1 else 'ITEMS'})"
-                )
-                self._populate_carousel()
-                self._populate_sidebar()
-                if self.current_media_index >= count:
-                    self._display_media_item(0)
-                else:
-                    self._display_media_item(self.current_media_index)
+        if not self.is_viewing_revision:
+            self.post = dict(self.original_full_post)
+            self._apply_post_data_to_view(self.post, is_revision=False)
+            self.original_media_items = list(self.media_items)
 
     def _display_media_item(self, index: int):
         if not self.media_items or index < 0 or index >= len(self.media_items):
@@ -1928,7 +2419,12 @@ class PostDetailView(QWidget):
 
         if self.stream_worker and self.stream_worker.isRunning():
             self.stream_worker.cancel()
-            self.stream_worker.wait(500)
+            try:
+                self.stream_worker.progress.disconnect()
+                self.stream_worker.finished.disconnect()
+            except Exception:
+                pass
+            self.stream_worker = None
 
         fallbacks = item.get("fallback_urls", [])
         self.stream_worker = _MediaStreamWorker(url, disk_path, fallback_urls=fallbacks, parent=self)
@@ -1961,7 +2457,12 @@ class PostDetailView(QWidget):
 
         if self.stream_worker and self.stream_worker.isRunning():
             self.stream_worker.cancel()
-            self.stream_worker.wait(500)
+            try:
+                self.stream_worker.progress.disconnect()
+                self.stream_worker.finished.disconnect()
+            except Exception:
+                pass
+            self.stream_worker = None
 
         fallbacks = item.get("fallback_urls", [])
         self.stream_worker = _MediaStreamWorker(url, disk_path, fallback_urls=fallbacks, parent=self)
@@ -2192,11 +2693,18 @@ class PostDetailView(QWidget):
         if not self.post:
             return
 
-        # Clear existing comments
+        # Clear existing comments and lazy render state
+        if getattr(self, "comments_load_more_frame", None):
+            self.comments_load_more_frame.deleteLater()
+            self.comments_load_more_frame = None
+
         while self.comments_list_layout.count():
             item = self.comments_list_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
+
+        self._all_loaded_comments = []
+        self._rendered_comments_count = 0
 
         self.comments_status_lbl.setText("Loading comments...")
         self.comments_status_lbl.setVisible(True)
@@ -2212,7 +2720,12 @@ class PostDetailView(QWidget):
 
         if self.comments_worker and self.comments_worker.isRunning():
             self.comments_worker.cancel()
-            self.comments_worker.wait(500)
+            try:
+                self.comments_worker.comments_loaded.disconnect()
+                self.comments_worker.comments_failed.disconnect()
+            except Exception:
+                pass
+            self.comments_worker = None
 
         self.comments_worker = _CommentsFetchWorker(
             svc, cid, pid, self.comments_cache_dir, self
@@ -2242,23 +2755,102 @@ class PostDetailView(QWidget):
             else:
                 top_level.append(c)
 
+        ordered = []
         for top in top_level:
-            card = CommentCardWidget(top, scale=self.scale, parent=self.comments_container)
-            self.comments_list_layout.addWidget(card)
-
-            # Insert replies beneath this parent
+            ordered.append({"comment": top, "is_reply": False})
             cid = str(top.get("id") or "")
             for rep in replies_by_parent.get(cid, []):
-                rep_card = CommentCardWidget(rep, scale=self.scale, parent=self.comments_container)
-                self.comments_list_layout.addWidget(rep_card)
+                ordered.append({"comment": rep, "is_reply": True})
 
         # Handle any orphaned replies
         seen_parents = {str(t.get("id") or "") for t in top_level}
         for pid, reps in replies_by_parent.items():
             if pid not in seen_parents:
                 for orphan in reps:
-                    card = CommentCardWidget(orphan, scale=self.scale, parent=self.comments_container)
-                    self.comments_list_layout.addWidget(card)
+                    ordered.append({"comment": orphan, "is_reply": True})
+
+        self._all_loaded_comments = ordered
+        self._rendered_comments_count = 0
+        self._render_comments_chunk(chunk_size=20)
+
+    def _render_comments_chunk(self, chunk_size: int = 25):
+        if not hasattr(self, "_all_loaded_comments") or not self._all_loaded_comments:
+            return
+
+        # Detach load-more button container while appending new cards
+        if getattr(self, "comments_load_more_frame", None):
+            self.comments_list_layout.removeWidget(self.comments_load_more_frame)
+            self.comments_load_more_frame.setParent(None)
+
+        start = self._rendered_comments_count
+        end = min(start + chunk_size, len(self._all_loaded_comments))
+        chunk = self._all_loaded_comments[start:end]
+
+        is_bulk = len(chunk) > 15
+        if is_bulk:
+            self.comments_container.setVisible(False)
+            self.setUpdatesEnabled(False)
+
+        try:
+            for item in chunk:
+                card = CommentCardWidget(
+                    item["comment"],
+                    is_reply=item["is_reply"],
+                    scale=self.scale,
+                    parent=self.comments_container
+                )
+                self.comments_list_layout.addWidget(card)
+        finally:
+            if is_bulk:
+                self.comments_container.setVisible(True)
+                self.setUpdatesEnabled(True)
+
+        self._rendered_comments_count = end
+        remaining = len(self._all_loaded_comments) - self._rendered_comments_count
+
+        if remaining > 0:
+            if not getattr(self, "comments_load_more_frame", None):
+                self._build_comments_load_more_ui()
+
+            next_batch = min(30, remaining)
+            self.comments_load_more_btn.setText(f"  Load More Comments ({next_batch} of {remaining} remaining)")
+            self.comments_load_all_btn.setText(f"Show All ({remaining})")
+            self.comments_list_layout.addWidget(self.comments_load_more_frame)
+
+    def _build_comments_load_more_ui(self):
+        scale = self.scale
+        self.comments_load_more_frame = QFrame(self.comments_container)
+        self.comments_load_more_frame.setObjectName("commentsLoadMoreFrame")
+        self.comments_load_more_frame.setStyleSheet("background: transparent; border: none; margin-top: 6px;")
+
+        row = QHBoxLayout(self.comments_load_more_frame)
+        row.setContentsMargins(0, 4, 0, 4)
+        row.setSpacing(int(10 * scale))
+
+        self.comments_load_more_btn = QPushButton("  Load More Comments", self.comments_load_more_frame)
+        self.comments_load_more_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.comments_load_more_btn.setIcon(QIcon(get_asset_path("assets/Svg/caret-down.svg")))
+        self.comments_load_more_btn.setIconSize(QSize(int(14 * scale), int(14 * scale)))
+        self.comments_load_more_btn.setStyleSheet(
+            "QPushButton { background-color: #20232B; color: #DFE1E5; border: 1px solid #333742; "
+            "border-radius: 6px; padding: 7px 16px; font-size: 8.5pt; font-weight: bold; } "
+            "QPushButton:hover { background-color: #2A2E38; border-color: #E5A198; color: #FFFFFF; }"
+        )
+        self.comments_load_more_btn.clicked.connect(lambda: self._render_comments_chunk(chunk_size=30))
+        row.addWidget(self.comments_load_more_btn)
+
+        self.comments_load_all_btn = QPushButton("Show All", self.comments_load_more_frame)
+        self.comments_load_all_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.comments_load_all_btn.setStyleSheet(
+            "QPushButton { background-color: transparent; color: #8C929E; border: 1px solid #2B2E38; "
+            "border-radius: 6px; padding: 7px 14px; font-size: 8pt; } "
+            "QPushButton:hover { background-color: #242730; color: #DFE1E5; border-color: #3D4251; }"
+        )
+        self.comments_load_all_btn.clicked.connect(
+            lambda: self._render_comments_chunk(chunk_size=len(self._all_loaded_comments))
+        )
+        row.addWidget(self.comments_load_all_btn)
+        row.addStretch(1)
 
     def _on_comments_failed(self, err_msg: str):
         short_err = (err_msg[:100] + "...") if len(err_msg) > 100 else err_msg
@@ -2275,7 +2867,6 @@ class PostDetailView(QWidget):
         if hasattr(self, "batch_hd_worker") and self.batch_hd_worker and self.batch_hd_worker.isRunning():
             try:
                 self.batch_hd_worker.cancel()
-                self.batch_hd_worker.wait(300)
             except Exception:
                 pass
             self.batch_hd_worker = None
@@ -2343,6 +2934,46 @@ class PostDetailView(QWidget):
         url = self._get_direct_post_url()
         if url:
             QDesktopServices.openUrl(QUrl(url))
+
+    def _update_favorite_button(self):
+        if not hasattr(self, "fav_post_btn") or not self.post:
+            return
+        fav_mgr = getattr(self, "fav_manager", None) or getattr(self.parent_app, "favorites_manager", None)
+        if not fav_mgr:
+            return
+        svc = (self.post.get("_creator_service") or self.post.get("service") or "patreon").lower().strip()
+        cid = str(self.post.get("_creator_id") or self.post.get("user") or "").strip()
+        pid = str(self.post.get("id") or "").strip()
+        is_fav = fav_mgr.is_favorite_post(svc, cid, pid)
+
+        if is_fav:
+            self.fav_post_btn.setText("  Favorited")
+            self.fav_post_btn.setIcon(QIcon(get_asset_path("assets/Svg/star.svg")))
+            self.fav_post_btn.setStyleSheet(
+                "QPushButton { background-color: #382A1B; color: #FCD34D; border: 1.5px solid #FCD34D; "
+                "border-radius: 5px; font-weight: bold; font-size: 8.5pt; padding: 4px 10px; }"
+                "QPushButton:hover { background-color: #4A3824; border-color: #FDE68A; color: #FFF; }"
+            )
+        else:
+            self.fav_post_btn.setText("  Favorite")
+            self.fav_post_btn.setIcon(QIcon(get_asset_path("assets/uisvg/heart.svg")))
+            self.fav_post_btn.setStyleSheet(
+                "QPushButton { background-color: #242730; color: #DFE1E5; border: 1px solid #363A45; "
+                "border-radius: 5px; font-weight: bold; font-size: 8.5pt; padding: 4px 10px; }"
+                "QPushButton:hover { background-color: #2F333E; color: #FFFFFF; border-color: #E5A198; }"
+            )
+
+    def _toggle_favorite_post(self):
+        if not self.post:
+            return
+        fav_mgr = getattr(self, "fav_manager", None) or getattr(self.parent_app, "favorites_manager", None)
+        if not fav_mgr:
+            return
+        is_fav = fav_mgr.toggle_post(self.post)
+        self._update_favorite_button()
+        msg = "★ Saved to Local Favorites" if is_fav else "Removed from Local Favorites"
+        self.nav_status_lbl.setText(msg)
+        QTimer.singleShot(2200, lambda: self.nav_status_lbl.setText(""))
 
     def _send_to_downloader(self):
         url = self._get_direct_post_url()
@@ -2423,13 +3054,16 @@ class PostDetailView(QWidget):
     def close(self):
         if self.post_worker and self.post_worker.isRunning():
             self.post_worker.cancel()
-            self.post_worker.wait(300)
         if self.comments_worker and self.comments_worker.isRunning():
             self.comments_worker.cancel()
-            self.comments_worker.wait(500)
         if self.stream_worker and self.stream_worker.isRunning():
             self.stream_worker.cancel()
-            self.stream_worker.wait(500)
+            try:
+                self.stream_worker.progress.disconnect()
+                self.stream_worker.finished.disconnect()
+            except Exception:
+                pass
+            self.stream_worker = None
         self.video_player.stop_and_release()
         self.gif_player.stop()
         super().close()
