@@ -336,24 +336,29 @@ class FavoritesTabWidget(QWidget):
         header_bar.addLayout(title_col, 1)
 
         # Local storage badge
+        badge_h = int(28 * scale)
         self.local_stats_badge = QLabel("Local: 0 Artists • 0 Posts")
+        self.local_stats_badge.setFixedHeight(badge_h)
+        self.local_stats_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.local_stats_badge.setStyleSheet(
             "font-size: 8pt; font-weight: bold; color: #FCD34D; background-color: #2D271D; "
-            "border: 1px solid #785A1D; border-radius: 4px; padding: 4px 8px;"
+            "border: 1px solid #785A1D; border-radius: 4px; padding: 0 10px;"
         )
-        header_bar.addWidget(self.local_stats_badge)
+        header_bar.addWidget(self.local_stats_badge, 0, Qt.AlignmentFlag.AlignVCenter)
 
         # Cookie Status indicator & Settings button
         self.cookie_status_badge = QLabel("Checking cookies...")
+        self.cookie_status_badge.setFixedHeight(badge_h)
+        self.cookie_status_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.cookie_status_badge.setStyleSheet(
             "font-size: 8pt; font-weight: bold; color: #9A9EAA; background-color: #2D3035; "
-            "border: 1px solid #424652; border-radius: 4px; padding: 4px 8px;"
+            "border: 1px solid #424652; border-radius: 4px; padding: 0 10px;"
         )
-        header_bar.addWidget(self.cookie_status_badge)
+        header_bar.addWidget(self.cookie_status_badge, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self.cookie_help_btn = QPushButton(" Cookie Settings")
         self.cookie_help_btn.setIcon(QIcon(get_asset_path("assets/Svg/settings.svg")))
-        self.cookie_help_btn.setFixedHeight(int(28 * scale))
+        self.cookie_help_btn.setFixedHeight(badge_h)
         self.cookie_help_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.cookie_help_btn.setStyleSheet(
             "QPushButton { background: #2A2D34; border: 1px solid #383D48; border-radius: 4px; "
@@ -361,7 +366,7 @@ class FavoritesTabWidget(QWidget):
             "QPushButton:hover { background: #353842; border-color: #60A5FA; color: #FFFFFF; }"
         )
         self.cookie_help_btn.clicked.connect(self._open_cookie_help)
-        header_bar.addWidget(self.cookie_help_btn)
+        header_bar.addWidget(self.cookie_help_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
         root_layout.addLayout(header_bar)
 
@@ -872,19 +877,19 @@ class FavoritesTabWidget(QWidget):
             self.cookie_status_badge.setText("Cookies: Active")
             self.cookie_status_badge.setStyleSheet(
                 "font-size: 8pt; font-weight: bold; color: #6EE7B7; background-color: #064E3B; "
-                "border: 1px solid #059669; border-radius: 4px; padding: 4px 8px;"
+                "border: 1px solid #059669; border-radius: 4px; padding: 0 10px;"
             )
         elif use_cookie:
             self.cookie_status_badge.setText("Cookies: Enabled (No cookie entered)")
             self.cookie_status_badge.setStyleSheet(
                 "font-size: 8pt; font-weight: bold; color: #FDE68A; background-color: #78350F; "
-                "border: 1px solid #D97706; border-radius: 4px; padding: 4px 8px;"
+                "border: 1px solid #D97706; border-radius: 4px; padding: 0 10px;"
             )
         else:
             self.cookie_status_badge.setText("Cookies: Off (Optional for Account Sync)")
             self.cookie_status_badge.setStyleSheet(
                 "font-size: 8pt; font-weight: bold; color: #9CA3AF; background-color: #1F2937; "
-                "border: 1px solid #374151; border-radius: 4px; padding: 4px 8px;"
+                "border: 1px solid #374151; border-radius: 4px; padding: 0 10px;"
             )
 
     def _open_cookie_help(self):

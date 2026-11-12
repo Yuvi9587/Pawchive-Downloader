@@ -109,9 +109,10 @@ class QueueTabWidget(QWidget):
         self.scale = scale
 
         # State tracking
-        self.files_data = {}         # key: str(filename) -> dict of file state
-        self.file_row_map = {}       # key: str(filename) -> row_index
-        self.row_file_map = {}       # key: int(row_index) -> file_key
+        self.files_data = {}         # key: str(unique_file_key) -> dict of file state
+        self.file_row_map = {}       # key: str(unique_file_key) -> row_index
+        self.row_file_map = {}       # key: int(row_index) -> unique_file_key
+        self._item_counter = 0       # Monotonic counter for guaranteed uniqueness
         self.speed_history = deque(maxlen=20)
         self.peak_speed_bps = 0.0
         self.current_speed_bps = 0.0
@@ -187,8 +188,13 @@ class QueueTabWidget(QWidget):
         jobs_v.setContentsMargins(int(8 * scale), int(8 * scale), int(8 * scale), int(8 * scale))
         self._setup_jobs_table(jobs_v)
         self.tab_view.addTab(self.jobs_page, "Batch Job Queue (0)")
+        self.tab_view.currentChanged.connect(self._on_subtab_changed)
 
         layout.addWidget(self.tab_view, 1)
+
+    def _on_subtab_changed(self, index: int):
+        if index == 1:
+            self.refresh_jobs_queue()
 
     def _setup_metric_cards(self, parent_layout):
         scale = self.scale
@@ -512,35 +518,53 @@ class QueueTabWidget(QWidget):
             fname = finfo.get('filename') or finfo.get('name') or ""
             if not fname:
                 continue
-            file_key = str(fname)
-            if file_key not in self.files_data:
-                size = finfo.get('size', 0) or 0
-                creator = finfo.get('creator') or getattr(self.parent_app, 'last_known_creator_name', "") or "Creator"
-                if (not creator or creator == "Creator" or str(creator).isdigit()) and hasattr(self, 'parent_app') and self.parent_app:
-                    parent_cname = getattr(self.parent_app, 'last_known_creator_name', "")
-                    if parent_cname and not str(parent_cname).isdigit():
-                        creator = parent_cname
-                    elif hasattr(self.parent_app, 'creator_name_cache'):
-                        c_from_cache = self.parent_app.creator_name_cache.get(str(creator))
-                        if c_from_cache and not str(c_from_cache).isdigit():
-                            creator = c_from_cache
-                self.files_data[file_key] = {
-                    'id': file_key,
-                    'filename': fname,
-                    'creator': creator,
-                    'post_title': finfo.get('post_title', ''),
-                    'post_id': finfo.get('post_id', ''),
-                    'status': 'queued',
-                    'downloaded_bytes': 0,
-                    'total_bytes': size,
-                    'speed_bps': 0.0,
-                    'start_time': now,
-                    'last_time': now,
-                    'last_bytes': 0,
-                    'save_path': "",
-                    'error_msg': ""
-                }
-                self._update_or_insert_file_row(file_key)
+            post_id = str(finfo.get('post_id') or "")
+
+            # Avoid queuing duplicate entries if the exact file is already present in queue
+            already_exists = False
+            for f in self.files_data.values():
+                if f.get('filename') == fname or f.get('orig_filename') == fname:
+                    if post_id and str(f.get('post_id', '')) == post_id:
+                        already_exists = True
+                        break
+                    elif not post_id and f.get('status') in ('queued', 'downloading'):
+                        already_exists = True
+                        break
+            if already_exists:
+                continue
+
+            self._item_counter += 1
+            file_key = f"{post_id}_{self._item_counter}_{fname}" if post_id else f"q_{self._item_counter}_{fname}"
+
+            size = finfo.get('size', 0) or 0
+            creator = finfo.get('creator') or getattr(self.parent_app, 'last_known_creator_name', "") or "Creator"
+            if (not creator or creator == "Creator" or str(creator).isdigit()) and hasattr(self, 'parent_app') and self.parent_app:
+                parent_cname = getattr(self.parent_app, 'last_known_creator_name', "")
+                if parent_cname and not str(parent_cname).isdigit():
+                    creator = parent_cname
+                elif hasattr(self.parent_app, 'creator_name_cache'):
+                    c_from_cache = self.parent_app.creator_name_cache.get(str(creator))
+                    if c_from_cache and not str(c_from_cache).isdigit():
+                        creator = c_from_cache
+
+            self.files_data[file_key] = {
+                'id': file_key,
+                'filename': fname,
+                'orig_filename': fname,
+                'creator': creator,
+                'post_title': finfo.get('post_title', ''),
+                'post_id': post_id,
+                'status': 'queued',
+                'downloaded_bytes': 0,
+                'total_bytes': size,
+                'speed_bps': 0.0,
+                'start_time': now,
+                'last_time': now,
+                'last_bytes': 0,
+                'save_path': "",
+                'error_msg': ""
+            }
+            self._update_or_insert_file_row(file_key)
 
         self._recalculate_and_refresh_stats()
 
@@ -551,19 +575,40 @@ class QueueTabWidget(QWidget):
         """
         if not filename:
             return
-        file_key = str(filename)
-        if file_key not in self.files_data:
-            # Check if any recorded file matches disk name or stem
-            for k, f in self.files_data.items():
-                if f.get('filename') == filename or os.path.basename(f.get('save_path', '')) == filename:
+
+        target = str(filename)
+        target_base = os.path.basename(target)
+
+        file_key = None
+        # 1. Match item currently queued or downloading
+        for k, f in self.files_data.items():
+            if f.get('status') in ('queued', 'downloading'):
+                fn = f.get('filename') or ""
+                orig = f.get('orig_filename') or ""
+                sp = os.path.basename(f.get('save_path', ''))
+                if target in (k, fn, orig, sp) or target_base in (fn, orig, sp):
                     file_key = k
                     break
 
-        if file_key not in self.files_data:
-            now = time.time()
+        # 2. If not found in active/queued, search all non-completed/non-skipped
+        if not file_key:
+            for k, f in self.files_data.items():
+                if f.get('status') not in ('completed', 'skipped'):
+                    fn = f.get('filename') or ""
+                    orig = f.get('orig_filename') or ""
+                    sp = os.path.basename(f.get('save_path', ''))
+                    if target in (k, fn, orig, sp) or target_base in (fn, orig, sp):
+                        file_key = k
+                        break
+
+        now = time.time()
+        if not file_key:
+            self._item_counter += 1
+            file_key = f"skip_{self._item_counter}_{target_base}"
             self.files_data[file_key] = {
                 'id': file_key,
-                'filename': filename,
+                'filename': target_base,
+                'orig_filename': target_base,
                 'creator': getattr(self.parent_app, 'last_known_creator_name', "") or "Skipped File",
                 'status': 'skipped',
                 'downloaded_bytes': 0,
@@ -593,24 +638,53 @@ class QueueTabWidget(QWidget):
         if not filename:
             return
 
-        now = time.time()
-        file_key = str(filename)
+        target = str(filename)
+        target_base = os.path.basename(target)
 
-        if file_key not in self.files_data:
-            for k, f in self.files_data.items():
-                if f.get('filename') == filename:
+        # 1. Match item currently downloading
+        file_key = None
+        for k, f in self.files_data.items():
+            if f.get('status') == 'downloading':
+                fn = f.get('filename') or ""
+                orig = f.get('orig_filename') or ""
+                sp = os.path.basename(f.get('save_path', ''))
+                if target in (k, fn, orig, sp) or target_base in (fn, orig, sp):
                     file_key = k
                     break
 
-        if file_key in self.files_data and self.files_data[file_key].get('status') in ('completed', 'skipped'):
-            # Already completed/skipped - ignore chunk progress so it never regresses to downloading
-            return
+        # 2. Match first queued item for this filename and transition it to downloading
+        if not file_key:
+            for k, f in self.files_data.items():
+                if f.get('status') == 'queued':
+                    fn = f.get('filename') or ""
+                    orig = f.get('orig_filename') or ""
+                    sp = os.path.basename(f.get('save_path', ''))
+                    if target in (k, fn, orig, sp) or target_base in (fn, orig, sp):
+                        file_key = k
+                        f['status'] = 'downloading'
+                        break
 
-        if file_key not in self.files_data:
+        # 3. Match any existing entry for this filename (prevent duplicate rows on subsequent chunk/terminal signals)
+        if not file_key:
+            for k, f in self.files_data.items():
+                fn = f.get('filename') or ""
+                orig = f.get('orig_filename') or ""
+                sp = os.path.basename(f.get('save_path', ''))
+                if target in (k, fn, orig, sp) or target_base in (fn, orig, sp):
+                    file_key = k
+                    break
+
+        now = time.time()
+        # 4. If still not found anywhere in queue, create new live downloading entry
+        if not file_key:
+            self._item_counter += 1
+            file_key = f"live_{self._item_counter}_{target_base}"
+            creator_name = getattr(self.parent_app, 'last_known_creator_name', "") or "Creator"
             self.files_data[file_key] = {
                 'id': file_key,
-                'filename': filename,
-                'creator': getattr(self.parent_app, 'last_known_creator_name', "") or "Active Post",
+                'filename': target_base,
+                'orig_filename': target_base,
+                'creator': creator_name,
                 'status': 'downloading',
                 'downloaded_bytes': 0,
                 'total_bytes': 0,
@@ -679,46 +753,98 @@ class QueueTabWidget(QWidget):
 
         disk_name = str(file_details_dict.get('disk_filename', '') or '')
         orig_name = str(file_details_dict.get('api_original_filename', '') or '')
+        post_id = str(file_details_dict.get('post_id', '') or '')
 
         file_key = None
-        if disk_name and disk_name in self.files_data:
-            file_key = disk_name
-        elif orig_name and orig_name in self.files_data:
-            file_key = orig_name
-        else:
-            # Match by filename field
-            for k, f in self.files_data.items():
-                if f.get('filename') in (disk_name, orig_name) or k in (disk_name, orig_name):
-                    file_key = k
-                    break
 
+        # Priority 1: Match by post_id and filename among downloading or queued items
+        if post_id:
+            for k, f in self.files_data.items():
+                if f.get('status') in ('downloading', 'queued') and str(f.get('post_id', '')) == post_id:
+                    fn = f.get('filename') or ""
+                    orig = f.get('orig_filename') or ""
+                    if disk_name and disk_name in (fn, orig):
+                        file_key = k
+                        break
+                    if orig_name and orig_name in (fn, orig):
+                        file_key = k
+                        break
+
+        # Priority 2: Match among actively downloading items
         if not file_key:
-            # Enhanced fallback matching: normalize and check basenames / sub-strings
-            norm_targets = {
+            for k, f in self.files_data.items():
+                if f.get('status') == 'downloading':
+                    fn = f.get('filename') or ""
+                    orig = f.get('orig_filename') or ""
+                    if disk_name and disk_name in (fn, orig, k):
+                        file_key = k
+                        break
+                    if orig_name and orig_name in (fn, orig, k):
+                        file_key = k
+                        break
+
+        # Priority 3: Match among queued items
+        if not file_key:
+            for k, f in self.files_data.items():
+                if f.get('status') == 'queued':
+                    fn = f.get('filename') or ""
+                    orig = f.get('orig_filename') or ""
+                    if disk_name and disk_name in (fn, orig, k):
+                        file_key = k
+                        break
+                    if orig_name and orig_name in (fn, orig, k):
+                        file_key = k
+                        break
+
+        # Priority 4: Basename/stem check among active/queued
+        if not file_key:
+            targets = {
                 disk_name.lower(), orig_name.lower(),
                 os.path.basename(disk_name).lower(), os.path.basename(orig_name).lower()
             }
-            norm_targets.discard("")
+            targets.discard("")
+            for k, f in self.files_data.items():
+                if f.get('status') in ('downloading', 'queued'):
+                    fn = (f.get('filename') or "").lower()
+                    orig = (f.get('orig_filename') or "").lower()
+                    if fn in targets or orig in targets:
+                        file_key = k
+                        break
+
+        # Priority 4b: Match any already existing entry for this filename (prevent duplicate completion rows)
+        if not file_key:
+            targets = {
+                disk_name.lower(), orig_name.lower(),
+                os.path.basename(disk_name).lower(), os.path.basename(orig_name).lower()
+            }
+            targets.discard("")
             for k, f in self.files_data.items():
                 fn = (f.get('filename') or "").lower()
-                k_norm = str(k).lower()
-                if fn in norm_targets or k_norm in norm_targets:
-                    file_key = k
-                    break
-                if any(t and (t in fn or fn in t) for t in norm_targets if len(t) > 6):
+                orig = (f.get('orig_filename') or "").lower()
+                if fn in targets or orig in targets:
                     file_key = k
                     break
 
         now = time.time()
+        # Priority 5: If not found, create new completed entry with unique key
         if not file_key:
-            file_key = disk_name or orig_name
-            if not file_key:
+            fname = disk_name or orig_name
+            if not fname:
                 return
-            resolved_c = file_details_dict.get('creator_display_name') or file_details_dict.get('creator_name') or getattr(self.parent_app, 'last_known_creator_name', "") or "Creator"
+            self._item_counter += 1
+            file_key = f"comp_{self._item_counter}_{fname}"
+            resolved_c = (
+                file_details_dict.get('creator_display_name')
+                or file_details_dict.get('creator_name')
+                or getattr(self.parent_app, 'last_known_creator_name', "")
+                or "Creator"
+            )
             self.files_data[file_key] = {
                 'id': file_key,
-                'filename': disk_name or orig_name,
+                'filename': fname,
+                'orig_filename': orig_name or fname,
                 'creator': resolved_c,
+                'post_id': post_id,
                 'status': 'completed',
                 'downloaded_bytes': 0,
                 'total_bytes': 0,
@@ -735,12 +861,10 @@ class QueueTabWidget(QWidget):
         file_item['speed_bps'] = 0.0
         if disk_name:
             file_item['filename'] = disk_name
-
-        # Alias both disk_name and orig_name in files_data to this file_item
-        if disk_name:
-            self.files_data[disk_name] = file_item
-        if orig_name:
-            self.files_data[orig_name] = file_item
+        if orig_name and not file_item.get('orig_filename'):
+            file_item['orig_filename'] = orig_name
+        if post_id and not file_item.get('post_id'):
+            file_item['post_id'] = post_id
 
         file_item['save_path'] = os.path.join(
             file_details_dict.get('download_path', ""),
@@ -780,15 +904,6 @@ class QueueTabWidget(QWidget):
                 file_item['downloaded_bytes'] = file_item['total_bytes']
 
         self._update_or_insert_file_row(file_key)
-        # Update row mappings for both names if row is known
-        if file_key in self.file_row_map:
-            row = self.file_row_map[file_key]
-            if disk_name:
-                self.file_row_map[disk_name] = row
-            if orig_name:
-                self.file_row_map[orig_name] = row
-            self.row_file_map[row] = file_key
-
         self._recalculate_and_refresh_stats()
 
     def on_file_failed(self, failure_list: list, retryable: bool = False):
@@ -803,6 +918,7 @@ class QueueTabWidget(QWidget):
             candidates = []
             err_msg = "Download error"
             creator = ""
+            post_id = ""
 
             if isinstance(fail_info, str):
                 candidates.append(fail_info.strip())
@@ -815,6 +931,7 @@ class QueueTabWidget(QWidget):
                     or "Download error"
                 )
                 creator = fail_info.get('creator') or fail_info.get('creator_display_name') or ""
+                post_id = str(fail_info.get('post_id') or "")
 
                 for key in ('filename', 'forced_filename_override', 'api_original_filename', 'name'):
                     val = fail_info.get(key)
@@ -843,31 +960,43 @@ class QueueTabWidget(QWidget):
             if not clean_candidates:
                 continue
 
-            # Find matching file_key in files_data
+            # Find matching file_key in files_data among downloading or queued items
             file_key = None
-            for cand in clean_candidates:
-                if cand in self.files_data:
-                    file_key = cand
-                    break
+            if post_id:
+                for k, f in self.files_data.items():
+                    if f.get('status') in ('downloading', 'queued') and str(f.get('post_id', '')) == post_id:
+                        fn = f.get('filename', '')
+                        orig = f.get('orig_filename', '')
+                        for cand in clean_candidates:
+                            if cand in (fn, orig, k):
+                                file_key = k
+                                break
+                    if file_key:
+                        break
 
             if not file_key:
-                for k, item in self.files_data.items():
-                    fn = item.get('filename', '')
-                    sp = os.path.basename(item.get('save_path', ''))
-                    for cand in clean_candidates:
-                        if cand in (k, fn, sp) or cand.lower() in (k.lower(), fn.lower(), sp.lower()):
-                            file_key = k
-                            break
+                for k, f in self.files_data.items():
+                    if f.get('status') in ('downloading', 'queued'):
+                        fn = f.get('filename', '')
+                        orig = f.get('orig_filename', '')
+                        for cand in clean_candidates:
+                            if cand in (fn, orig, k) or cand.lower() in (fn.lower(), orig.lower(), k.lower()):
+                                file_key = k
+                                break
                     if file_key:
                         break
 
             now = time.time()
             if not file_key:
-                file_key = clean_candidates[0]
+                self._item_counter += 1
+                base_cand = clean_candidates[0]
+                file_key = f"fail_{self._item_counter}_{base_cand}"
                 self.files_data[file_key] = {
                     'id': file_key,
-                    'filename': file_key,
+                    'filename': base_cand,
+                    'orig_filename': base_cand,
                     'creator': creator or getattr(self.parent_app, 'last_known_creator_name', "") or "Creator",
+                    'post_id': post_id,
                     'status': 'failed',
                     'downloaded_bytes': 0,
                     'total_bytes': 0,
@@ -885,11 +1014,6 @@ class QueueTabWidget(QWidget):
             file_item['error_msg'] = err_msg
             if creator and not file_item.get('creator'):
                 file_item['creator'] = creator
-
-            # Alias candidate names in files_data
-            for cand in clean_candidates:
-                if cand:
-                    self.files_data[cand] = file_item
 
             self._update_or_insert_file_row(file_key)
 
@@ -937,7 +1061,8 @@ class QueueTabWidget(QWidget):
 
     def on_tab_activated(self):
         """Called whenever the user clicks to view the Queue tab."""
-        self.refresh_jobs_queue()
+        if hasattr(self, 'tab_view') and self.tab_view.currentIndex() == 1:
+            self.refresh_jobs_queue()
         self._recalculate_and_refresh_stats()
         if self.current_filter == "all" and getattr(self, 'auto_scroll_enabled', True):
             self._scroll_to_latest_active(ensure_visible_only=True)
@@ -954,84 +1079,77 @@ class QueueTabWidget(QWidget):
         scale = self.scale
         table = self.files_table
 
-        # Determine row index safely with multi-tier checks
-        row = None
-        if file_key in self.file_row_map:
-            row = self.file_row_map[file_key]
-        elif file_item.get('id') and file_item.get('id') in self.file_row_map:
-            row = self.file_row_map[file_item['id']]
-        elif file_item.get('filename') and file_item.get('filename') in self.file_row_map:
-            row = self.file_row_map[file_item['filename']]
-        else:
+        # Determine row index safely using unique file_key
+        row = self.file_row_map.get(file_key)
+        if row is None or row >= table.rowCount() or self.row_file_map.get(row) != file_key:
+            # Check UserRole for exact unique file_key
+            found_row = None
             for r in range(table.rowCount()):
                 it = table.item(r, 1)
-                if it and (it.data(Qt.ItemDataRole.UserRole) == file_key or it.text() == file_key or it.text() == file_item.get('filename')):
-                    row = r
+                if it and it.data(Qt.ItemDataRole.UserRole) == file_key:
+                    found_row = r
                     break
+            if found_row is not None:
+                row = found_row
+            else:
+                row = table.rowCount()
+                table.insertRow(row)
+                table.setRowHeight(row, int(38 * scale))
 
-        if row is None or row >= table.rowCount():
-            row = table.rowCount()
-            table.insertRow(row)
-            table.setRowHeight(row, int(38 * scale))
+                # Setup widgets once on row insertion
+                status_lbl = QLabel()
+                status_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                table.setCellWidget(row, 0, status_lbl)
 
-            # Setup widgets once on row insertion
-            status_lbl = QLabel()
-            status_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            table.setCellWidget(row, 0, status_lbl)
+                it_fn = QTableWidgetItem(file_item.get('filename', ''))
+                it_fn.setData(Qt.ItemDataRole.UserRole, file_key)
+                table.setItem(row, 1, it_fn)
 
-            it_fn = QTableWidgetItem(file_item.get('filename', ''))
-            it_fn.setData(Qt.ItemDataRole.UserRole, file_item.get('id') or file_key)
-            table.setItem(row, 1, it_fn)
+                table.setItem(row, 2, QTableWidgetItem(file_item.get('creator', '')))
 
-            table.setItem(row, 2, QTableWidgetItem(file_item.get('creator', '')))
+                prog_bar = QProgressBar()
+                prog_bar.setRange(0, 100)
+                prog_bar.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                prog_bar.setFixedHeight(int(18 * scale))
+                prog_bar.setStyleSheet(
+                    "QProgressBar {"
+                    "   background-color: #1A1C20; border: 1px solid #383D48; border-radius: 4px;"
+                    "   text-align: center; color: #FFFFFF; font-size: 8pt; font-weight: bold;"
+                    "}"
+                    "QProgressBar::chunk {"
+                    "   background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #B55D52, stop:1 #D48378);"
+                    "   border-radius: 3px;"
+                    "}"
+                )
+                table.setCellWidget(row, 3, prog_bar)
 
-            prog_bar = QProgressBar()
-            prog_bar.setRange(0, 100)
-            prog_bar.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            prog_bar.setFixedHeight(int(18 * scale))
-            prog_bar.setStyleSheet(
-                "QProgressBar {"
-                "   background-color: #1A1C20; border: 1px solid #383D48; border-radius: 4px;"
-                "   text-align: center; color: #FFFFFF; font-size: 8pt; font-weight: bold;"
-                "}"
-                "QProgressBar::chunk {"
-                "   background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #B55D52, stop:1 #D48378);"
-                "   border-radius: 3px;"
-                "}"
-            )
-            table.setCellWidget(row, 3, prog_bar)
+                table.setItem(row, 4, QTableWidgetItem("0 B"))
+                table.setItem(row, 5, QTableWidgetItem("0 B"))
+                table.setItem(row, 6, QTableWidgetItem("Unknown"))
+                table.setItem(row, 7, QTableWidgetItem("0.0 KB/s"))
 
-            table.setItem(row, 4, QTableWidgetItem("0 B"))
-            table.setItem(row, 5, QTableWidgetItem("0 B"))
-            table.setItem(row, 6, QTableWidgetItem("Unknown"))
-            table.setItem(row, 7, QTableWidgetItem("0.0 KB/s"))
-
-            # Actions button (Folder icon)
-            btn = QPushButton()
-            btn.setIcon(QIcon(get_asset_path("assets/Svg/folder.svg")))
-            btn.setIconSize(QSize(int(14 * scale), int(14 * scale)))
-            btn.setFixedSize(int(26 * scale), int(26 * scale))
-            btn.setToolTip("Open folder containing file")
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.setStyleSheet(
-                "QPushButton { background: #2A2D34; border: 1px solid #383D48; border-radius: 4px; }"
-                "QPushButton:hover { background: #353842; border-color: #60A5FA; }"
-            )
-            btn.clicked.connect(lambda chk=False, fk=file_key: self._open_file_folder(fk))
-            action_container = QWidget()
-            action_layout = QHBoxLayout(action_container)
-            action_layout.setContentsMargins(0, 0, 0, 0)
-            action_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            action_layout.addWidget(btn)
-            table.setCellWidget(row, 8, action_container)
+                # Actions button (Folder icon)
+                btn = QPushButton()
+                btn.setIcon(QIcon(get_asset_path("assets/Svg/folder.svg")))
+                btn.setIconSize(QSize(int(14 * scale), int(14 * scale)))
+                btn.setFixedSize(int(26 * scale), int(26 * scale))
+                btn.setToolTip("Open folder containing file")
+                btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                btn.setStyleSheet(
+                    "QPushButton { background: #2A2D34; border: 1px solid #383D48; border-radius: 4px; }"
+                    "QPushButton:hover { background: #353842; border-color: #60A5FA; }"
+                )
+                btn.clicked.connect(lambda chk=False, fk=file_key: self._open_file_folder(fk))
+                action_container = QWidget()
+                action_layout = QHBoxLayout(action_container)
+                action_layout.setContentsMargins(0, 0, 0, 0)
+                action_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                action_layout.addWidget(btn)
+                table.setCellWidget(row, 8, action_container)
 
         # Update mapping
         self.file_row_map[file_key] = row
         self.row_file_map[row] = file_key
-        if file_item.get('id'):
-            self.file_row_map[file_item['id']] = row
-        if file_item.get('filename'):
-            self.file_row_map[file_item['filename']] = row
 
         # Update row data
         status = file_item.get('status', 'downloading')
@@ -1216,8 +1334,7 @@ class QueueTabWidget(QWidget):
     def _get_file_item_for_row(self, row: int) -> dict:
         """
         Retrieves the file_item dictionary corresponding to a table row, using
-        multi-tier lookups (row_file_map, QTableWidgetItem UserRole, table text,
-        or searching files_data values).
+        direct row_file_map or QTableWidgetItem UserRole.
         """
         # Tier 1: Look up row index in row_file_map
         fk = self.row_file_map.get(row)
@@ -1230,17 +1347,6 @@ class QueueTabWidget(QWidget):
             role_key = fn_item.data(Qt.ItemDataRole.UserRole)
             if role_key and role_key in self.files_data:
                 return self.files_data[role_key]
-
-            # Tier 3: Look up item text directly in files_data
-            txt = fn_item.text().strip()
-            if txt and txt in self.files_data:
-                return self.files_data[txt]
-
-            # Tier 4: Search files_data values by filename or save_path
-            if txt:
-                for f in self.files_data.values():
-                    if f.get('filename') == txt or os.path.basename(f.get('save_path', '')) == txt:
-                        return f
 
         return {}
 
@@ -1598,22 +1704,18 @@ class QueueTabWidget(QWidget):
 
     def clear_completed(self):
         """Cleans up completed items from the table and memory."""
-        unique_completed = [f for f in {id(f): f for f in self.files_data.values()}.values() if f.get('status') in ('completed', 'skipped')]
-        completed_ids = {id(f) for f in unique_completed}
-
-        # Remove all aliases referencing completed items
-        self.files_data = {k: v for k, v in self.files_data.items() if id(v) not in completed_ids}
+        self.files_data = {
+            k: v for k, v in self.files_data.items()
+            if v.get('status') not in ('completed', 'skipped')
+        }
 
         self.files_table.setRowCount(0)
         self.file_row_map.clear()
         self.row_file_map.clear()
 
         # Re-insert remaining unique items
-        unique_remaining = list({id(f): f for f in self.files_data.values()}.values())
-        for f in unique_remaining:
-            fk = f.get('id') or f.get('filename')
-            if fk:
-                self._update_or_insert_file_row(fk)
+        for fk in list(self.files_data.keys()):
+            self._update_or_insert_file_row(fk)
 
         self._recalculate_and_refresh_stats()
 
@@ -1672,10 +1774,7 @@ class QueueTabWidget(QWidget):
         elif selected == act_copy:
             QApplication.clipboard().setText(file_item.get('filename', ''))
         elif selected == act_remove:
-            item_id = id(file_item) if file_item else None
-            if item_id:
-                self.files_data = {k: v for k, v in self.files_data.items() if id(v) != item_id}
-            elif file_key in self.files_data:
+            if file_key in self.files_data:
                 del self.files_data[file_key]
 
             self.files_table.removeRow(row)
@@ -1684,7 +1783,8 @@ class QueueTabWidget(QWidget):
             for r in range(self.files_table.rowCount()):
                 item = self.files_table.item(r, 1)
                 if item:
-                    fk = item.data(Qt.ItemDataRole.UserRole) or item.text()
-                    self.file_row_map[fk] = r
-                    self.row_file_map[r] = fk
+                    fk = item.data(Qt.ItemDataRole.UserRole)
+                    if fk:
+                        self.file_row_map[fk] = r
+                        self.row_file_map[r] = fk
             self._recalculate_and_refresh_stats()

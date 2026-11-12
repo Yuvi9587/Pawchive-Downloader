@@ -8458,6 +8458,7 @@ class DownloaderApp (QWidget ):
                 cname = self.current_processing_favorite_item_info.get('creator_name')
             if not cname:
                 cname = getattr(self, 'last_known_creator_name', None) or "Creator"
+            self.last_known_creator_name = cname
 
             force_artist_folder = self.current_processing_favorite_item_info.get('force_artist_folder', True)
             if force_artist_folder and cname:

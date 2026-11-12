@@ -92,7 +92,7 @@ class FetchCreatorsApiThread(QThread):
 
 class LoadLocalCreatorsThread(QThread):
     """Loads cached creators from data/creators.json in background without blocking UI."""
-    loaded_signal = Signal(list)
+    loaded_signal = Signal(list, dict)
 
     def __init__(self, file_path):
         super().__init__()
@@ -100,7 +100,7 @@ class LoadLocalCreatorsThread(QThread):
 
     def run(self):
         if not self.file_path or not os.path.exists(self.file_path):
-            self.loaded_signal.emit([])
+            self.loaded_signal.emit([], {})
             return
 
         try:
@@ -109,15 +109,102 @@ class LoadLocalCreatorsThread(QThread):
             if isinstance(data, list):
                 if data and isinstance(data[0], list):
                     data = data[0]
-                filtered_data = [
-                    c for c in data
-                    if isinstance(c, dict) and (c.get("service") or "").lower().strip() in SUPPORTED_PLATFORMS
-                ]
-                self.loaded_signal.emit(filtered_data)
+                filtered_data = []
+                name_cache = {}
+                for c in data:
+                    if isinstance(c, dict):
+                        svc = (c.get("service") or "").lower().strip()
+                        if svc in SUPPORTED_PLATFORMS:
+                            c["_svc"] = svc
+                            cname = (c.get("name") or "").strip()
+                            cid = str(c.get("id") or "").strip()
+                            c["_sname"] = cname.lower()
+                            c["_sid"] = cid
+                            c["_fav"] = int(c.get("favorited") or 0)
+                            c["_upd"] = int(c.get("updated") or 0)
+                            filtered_data.append(c)
+                            if cid and cname:
+                                name_cache[(svc, cid)] = cname
+                                if cid not in name_cache:
+                                    name_cache[cid] = cname
+
+                # Pre-sort in background thread to prevent UI freezing on Core i3
+                filtered_data.sort(key=lambda c: (-c.get("_fav", 0), c.get("_sname", "")))
+                self.loaded_signal.emit(filtered_data, name_cache)
             else:
-                self.loaded_signal.emit([])
+                self.loaded_signal.emit([], {})
         except Exception:
-            self.loaded_signal.emit([])
+            self.loaded_signal.emit([], {})
+
+
+class _CreatorFilterWorker(QThread):
+    """
+    Executes fast in-memory searching and sorting across 98,000+ creators
+    in a background thread to prevent UI freezing on lower-spec hardware (i3 / HDD).
+    """
+    results_ready = Signal(list, int)
+
+    def __init__(self, creators: list, query: str, platform_filter: str, sort_mode: str, fav_keys: set, generation: int, parent=None):
+        super().__init__(parent)
+        self.creators = creators
+        self.query = query
+        self.platform_filter = platform_filter
+        self.sort_mode = sort_mode
+        self.fav_keys = fav_keys
+        self.generation = generation
+        self._is_cancelled = False
+
+    def cancel(self):
+        self._is_cancelled = True
+
+    def run(self):
+        if self._is_cancelled or not self.creators:
+            return
+
+        # 1. Platform Filter
+        pf = self.platform_filter
+        if "Favorites" in pf:
+            favs = self.fav_keys
+            results = [c for c in self.creators if (c.get("_svc"), c.get("_sid")) in favs]
+        elif pf != "All Platforms":
+            pf_lower = pf.lower()
+            results = [c for c in self.creators if c.get("_svc") == pf_lower]
+        else:
+            results = list(self.creators)
+
+        if self._is_cancelled:
+            return
+
+        # 2. Text / ID / URL Search Query
+        q = self.query
+        if q:
+            if "pawchive.pw" in q or "kemono" in q or "/" in q:
+                parts = [p for p in q.split("/") if p]
+                if len(parts) >= 2:
+                    q_id = parts[-1]
+                    results = [c for c in results if c.get("_sid") == q_id or q in c.get("_sname", "")]
+                else:
+                    results = [c for c in results if q in c.get("_sname", "")]
+            else:
+                results = [
+                    c for c in results
+                    if q in c.get("_sname", "") or q in c.get("_sid", "")
+                ]
+
+        if self._is_cancelled:
+            return
+
+        # 3. Sorting Mode
+        sm = self.sort_mode
+        if sm == "Most Favorited":
+            results.sort(key=lambda c: (-c.get("_fav", 0), c.get("_sname", "")))
+        elif sm == "Name (A-Z)":
+            results.sort(key=lambda c: c.get("_sname", ""))
+        elif sm == "Recently Updated":
+            results.sort(key=lambda c: (-c.get("_upd", 0), c.get("_sname", "")))
+
+        if not self._is_cancelled:
+            self.results_ready.emit(results, self.generation)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -226,7 +313,7 @@ class CreatorMediaManager(QObject):
         os.makedirs(self.avatars_cache_dir, exist_ok=True)
         os.makedirs(self.banners_cache_dir, exist_ok=True)
 
-        self._max_capacity = 80          # Bound in-memory cache to 30 creators (30 banners + 30 avatars + buffer)
+        self._max_capacity = 120         # In-memory LRU cache up to 120 avatars & banners
         self._memory_cache = OrderedDict() # key -> QPixmap (LRU order)
         self._in_progress = set()        # (kind, service, creator_id)
         self._failed_keys = set()        # (kind, service, creator_id)
@@ -477,6 +564,53 @@ class CreatorCardDelegate(QStyledItemDelegate):
 
         scale = self.scale
         creator = index.data(Qt.ItemDataRole.UserRole) or {}
+
+        # ── Skeleton Loading Placeholder ──
+        if creator.get("_is_skeleton"):
+            r = option.rect.adjusted(int(4 * scale), int(4 * scale), int(-4 * scale), int(-4 * scale))
+            card_w = r.width()
+            card_r = 10 * scale
+
+            # Card base container
+            painter.setPen(QPen(QColor('#2C2F38'), 1.0))
+            painter.setBrush(QBrush(QColor('#1E2026')))
+            painter.drawRoundedRect(r, card_r, card_r)
+
+            # Header banner placeholder
+            banner_h = int(82 * scale)
+            card_clip = QPainterPath()
+            card_clip.addRoundedRect(r, card_r, card_r)
+            painter.save()
+            painter.setClipPath(card_clip)
+            painter.fillRect(QRectF(r.x(), r.y(), card_w, banner_h), QBrush(QColor('#252832')))
+            painter.restore()
+
+            # Circular avatar placeholder
+            av_sz = int(48 * scale)
+            av_x = r.x() + int(14 * scale)
+            av_y = r.y() + banner_h - int(24 * scale)
+            av_rect = QRectF(av_x, av_y, av_sz, av_sz)
+            painter.setPen(QPen(QColor('#1E2026'), int(3 * scale)))
+            painter.setBrush(QBrush(QColor('#2E323D')))
+            painter.drawEllipse(av_rect)
+
+            # Name placeholder pill
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(QColor('#2F333E')))
+            name_bar = QRectF(av_x, av_y + av_sz + int(10 * scale), card_w - int(28 * scale), int(12 * scale))
+            painter.drawRoundedRect(name_bar, 3 * scale, 3 * scale)
+
+            # Tag placeholder pill
+            badge_bar = QRectF(av_x, name_bar.bottom() + int(8 * scale), int(70 * scale), int(14 * scale))
+            painter.drawRoundedRect(badge_bar, 3 * scale, 3 * scale)
+
+            # Stats placeholder bar
+            bot_bar = QRectF(av_x, r.bottom() - int(18 * scale), int(90 * scale), int(10 * scale))
+            painter.drawRoundedRect(bot_bar, 2 * scale, 2 * scale)
+
+            painter.restore()
+            return
+
         name = creator.get('name') or 'Unknown'
         svc = (creator.get('service') or 'other').lower().strip()
         creator_id = str(creator.get('id') or '')
@@ -797,6 +931,25 @@ class CreatorsTableModel(QAbstractTableModel):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  Responsive Grid View (Auto-reflow on size & layout changes)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ResponsiveGridView(QListView):
+    """
+    QListView that triggers responsive column stretching whenever its own geometry changes.
+    Ensures zero dead space on window resize, tab switch, maximize, or resolution changes.
+    """
+    def __init__(self, on_resized=None, parent=None):
+        super().__init__(parent)
+        self._on_resized = on_resized
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._on_resized:
+            self._on_resized()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  Main Creators Tab Widget
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -832,8 +985,12 @@ class CreatorsTabWidget(QWidget):
 
         self.debounce_timer = QTimer(self)
         self.debounce_timer.setSingleShot(True)
-        self.debounce_timer.setInterval(220)
+        self.debounce_timer.setInterval(350)
         self.debounce_timer.timeout.connect(self._apply_filter)
+        self._filter_worker = None
+        self._active_filter_workers = set()
+        self._filter_generation = 0
+        self._default_creators = []
 
         # Creator Media (Avatars & Banners) Cache & Async Loader
         self.media_cache_dir = os.path.join(project_root, "appdata", "cache")
@@ -982,7 +1139,7 @@ class CreatorsTabWidget(QWidget):
         self.view_stack = QStackedWidget()
 
         # 1. Responsive Grid View (QListView in IconMode)
-        self.grid_view = QListView()
+        self.grid_view = ResponsiveGridView(on_resized=self._adjust_grid_columns, parent=self)
         self.grid_view.setObjectName("CreatorsGrid")
         self.grid_view.setViewMode(QListView.ViewMode.IconMode)
         self.grid_view.setResizeMode(QListView.ResizeMode.Adjust)  # Key: auto-reflow to monitor resolution!
@@ -996,7 +1153,8 @@ class CreatorsTabWidget(QWidget):
         self.grid_view.setMouseTracking(True)
         self.grid_view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
 
-        self.grid_model = CreatorsGridModel([])
+        # Initial skeleton state for instant visual feedback on startup
+        self.grid_model = CreatorsGridModel([{"_is_skeleton": True} for _ in range(18)])
         self.grid_view.setModel(self.grid_model)
         self.card_delegate = CreatorCardDelegate(scale, self.avatar_manager, self.fav_manager, self.grid_view)
         self.grid_view.setItemDelegate(self.card_delegate)
@@ -1152,12 +1310,22 @@ class CreatorsTabWidget(QWidget):
         scale = getattr(self, "scale", 1.0)
         base_w = int(220 * scale)
         base_h = int(205 * scale)
-        cols = max(1, vp_w // base_w)
-        slot_w = max(int(160 * scale), (vp_w - 2) // cols)
+
+        sb = self.grid_view.verticalScrollBar()
+        sb_w = (sb.width() if 0 < sb.width() <= 40 else sb.sizeHint().width()) if not sb.isVisible() else 0
+        safety = sb_w + int(12 * scale)
+        usable_w = vp_w - safety
+        if usable_w <= 100:
+            usable_w = vp_w - int(4 * scale)
+
+        cols = max(1, usable_w // base_w)
+        slot_w = max(int(160 * scale), usable_w // cols)
         slot_h = int(slot_w * (base_h / base_w))
         self.card_delegate.card_w = slot_w
         self.card_delegate.card_h = slot_h
         self.grid_view.setGridSize(QSize(slot_w, slot_h))
+        self.grid_view.scheduleDelayedItemsLayout()
+        self.grid_view.viewport().update()
 
     def _init_table_header_width(self):
         if not getattr(self, "_table_header_initialized", False):
@@ -1172,12 +1340,14 @@ class CreatorsTabWidget(QWidget):
     def showEvent(self, event):
         super().showEvent(event)
         self._adjust_grid_columns()
+        QTimer.singleShot(0, self._adjust_grid_columns)
         self._init_table_header_width()
         self._scroll_prune_timer.start()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._adjust_grid_columns()
+        QTimer.singleShot(0, self._adjust_grid_columns)
         self._scroll_prune_timer.start()
 
     def closeEvent(self, event):
@@ -1251,14 +1421,16 @@ class CreatorsTabWidget(QWidget):
         return visible_keys
 
     def on_tab_deactivated(self):
-        """Called when user navigates away from the Creators tab: unloads memory cache immediately."""
+        """Called when user navigates away from the Creators tab."""
         self._scroll_prune_timer.stop()
-        if hasattr(self, 'avatar_manager') and self.avatar_manager:
-            self.avatar_manager.clear_memory_cache()
+        if hasattr(self, 'debounce_timer'):
+            self.debounce_timer.stop()
 
     def on_tab_activated(self):
-        """Called when user navigates back to Creators tab: re-renders visible viewport from disk cache."""
+        """Called when user navigates back to Creators tab: re-renders visible viewport smoothly."""
         self._adjust_grid_columns()
+        QTimer.singleShot(0, self._adjust_grid_columns)
+        QTimer.singleShot(60, self._adjust_grid_columns)
         if hasattr(self, 'view_stack'):
             if self.view_stack.currentIndex() == 0:
                 self.grid_view.viewport().update()
@@ -1297,23 +1469,19 @@ class CreatorsTabWidget(QWidget):
         self.load_thread.loaded_signal.connect(self._on_local_data_loaded)
         self.load_thread.start()
 
-    def _on_local_data_loaded(self, creators):
-        self.all_creators = creators
-        if creators:
-            self.count_label.setText(f"{len(creators):,} creators cached")
+    def _on_local_data_loaded(self, creators, name_cache=None):
+        self.all_creators = creators or []
+        if self.all_creators:
+            # Data was pre-sorted in background thread for 0ms instant loading without GUI freeze
+            self._default_creators = self.all_creators
+            self.count_label.setText(f"{len(self.all_creators):,} creators cached")
+            if name_cache and hasattr(self.parent_app, 'creator_name_cache') and isinstance(self.parent_app.creator_name_cache, dict):
+                self.parent_app.creator_name_cache.update(name_cache)
             self._apply_filter()
-            if hasattr(self.parent_app, 'creator_name_cache') and isinstance(self.parent_app.creator_name_cache, dict):
-                for c in creators:
-                    cid = str(c.get("id", "")).strip()
-                    cname = (c.get("name") or "").strip()
-                    csvc = (c.get("service") or "").lower().strip()
-                    if cid and cname:
-                        if csvc:
-                            self.parent_app.creator_name_cache[(csvc, cid)] = cname
-                        if cid not in self.parent_app.creator_name_cache:
-                            self.parent_app.creator_name_cache[cid] = cname
         else:
             self.count_label.setText("No local database found. Click 'Sync with API' to fetch.")
+            self.grid_model.set_creators([])
+            self.table_model.set_creators([])
 
     def _on_favorites_changed(self):
         self.grid_view.viewport().update()
@@ -1325,46 +1493,64 @@ class CreatorsTabWidget(QWidget):
         self.debounce_timer.start()
 
     def _apply_filter(self):
+        if not self.all_creators:
+            return
+
         query = self.search_input.text().strip().lower()
         platform_filter = self.platform_combo.currentText()
         sort_mode = self.sort_combo.currentText()
 
-        # Enforce Pawchive supported platforms strictly
-        results = [
-            c for c in self.all_creators
-            if (c.get("service") or "").lower().strip() in SUPPORTED_PLATFORMS
-        ]
+        # Fast path for default view (instant 0ms reset)
+        if not query and platform_filter == "All Platforms" and sort_mode == "Most Favorited":
+            if getattr(self, "_default_creators", None):
+                self.filtered_creators = self._default_creators
+                self.current_page = 1
+                self._load_current_page()
+                total = len(self.all_creators)
+                self.count_label.setText(f"{total:,} creators available")
+                return
 
-        if "Favorites" in platform_filter:
-            results = [
-                c for c in results
-                if self.fav_manager and self.fav_manager.is_favorite(c.get("service"), c.get("id"))
-            ]
-        elif platform_filter != "All Platforms":
-            pf_lower = platform_filter.lower()
-            results = [c for c in results if (c.get("service") or "").lower() == pf_lower]
+        # Cancel any active background search thread safely without C++ destruction crashes
+        if hasattr(self, "_filter_worker") and self._filter_worker:
+            worker = self._filter_worker
+            self._filter_worker = None
+            worker.cancel()
+            try:
+                worker.results_ready.disconnect()
+            except Exception:
+                pass
 
-        if query:
-            if "pawchive.pw" in query or "kemono" in query or "/" in query:
-                parts = [p for p in query.split("/") if p]
-                if len(parts) >= 2:
-                    q_id = parts[-1]
-                    results = [c for c in results if str(c.get("id")) == q_id or query in (c.get("name") or "").lower()]
-                else:
-                    results = [c for c in results if query in (c.get("name") or "").lower()]
-            else:
-                results = [
-                    c for c in results
-                    if query in (c.get("name") or "").lower() or query in str(c.get("id", ""))
-                ]
+        self._filter_generation = getattr(self, "_filter_generation", 0) + 1
+        gen = self._filter_generation
 
-        if sort_mode == "Most Favorited":
-            results.sort(key=lambda c: (-c.get("favorited", 0), (c.get("name") or "").lower()))
-        elif sort_mode == "Name (A-Z)":
-            results.sort(key=lambda c: (c.get("name") or "").lower())
-        elif sort_mode == "Recently Updated":
-            results.sort(key=lambda c: (-c.get("updated", 0), (c.get("name") or "").lower()))
+        fav_keys = set()
+        if self.fav_manager and hasattr(self.fav_manager, "get_all_favorites"):
+            try:
+                favs = self.fav_manager.get_all_favorites(fav_type="creator")
+                fav_keys = {(f.get("service", "").lower(), str(f.get("id", "")).strip()) for f in favs}
+            except Exception:
+                pass
 
+        worker = _CreatorFilterWorker(
+            creators=self.all_creators,
+            query=query,
+            platform_filter=platform_filter,
+            sort_mode=sort_mode,
+            fav_keys=fav_keys,
+            generation=gen,
+            parent=self
+        )
+        if not hasattr(self, "_active_filter_workers"):
+            self._active_filter_workers = set()
+        self._active_filter_workers.add(worker)
+        worker.finished.connect(lambda w=worker: self._active_filter_workers.discard(w))
+        self._filter_worker = worker
+        self._filter_worker.results_ready.connect(self._on_filter_results_ready)
+        self._filter_worker.start()
+
+    def _on_filter_results_ready(self, results: list, generation: int):
+        if generation != getattr(self, "_filter_generation", 0):
+            return
         self.filtered_creators = results
         self.current_page = 1
         self._load_current_page()
@@ -1424,14 +1610,12 @@ class CreatorsTabWidget(QWidget):
         end_idx = min(start_idx + self.page_size, total)
         page_creators = self.filtered_creators[start_idx:end_idx] if total > 0 else []
 
-        # 1. Unload previous page's banners and avatars from RAM immediately
-        if hasattr(self, 'avatar_manager') and self.avatar_manager:
-            self.avatar_manager.clear_memory_cache()
-
-        # 2. Populate models with the current 30 creators only
+        # 1. Populate models with the current 30 creators only
         self.grid_model.set_creators(page_creators)
         self.table_model.set_creators(page_creators)
         self._adjust_grid_columns()
+        QTimer.singleShot(0, self._adjust_grid_columns)
+        QTimer.singleShot(60, self._adjust_grid_columns)
 
         # 3. Reset scroll position to top
         if hasattr(self, 'grid_view') and self.grid_view.verticalScrollBar():
@@ -1668,11 +1852,12 @@ class CreatorsTabWidget(QWidget):
         if hasattr(self.parent_app, 'posts_tab') and hasattr(self.parent_app, 'switch_tab'):
             if hasattr(self.parent_app.posts_tab, '_close_post_detail'):
                 self.parent_app.posts_tab._close_post_detail()
+            # Activate posts tab first so layout geometry is populated
+            self.parent_app.switch_tab("posts")
             if hasattr(self.parent_app.posts_tab, 'load_creators'):
                 self.parent_app.posts_tab.load_creators(creators)
             else:
                 self.parent_app.posts_tab.load_creator(creators[0])
-            self.parent_app.switch_tab("posts")
 
     def _start_api_sync(self):
         self.sync_button.setEnabled(False)
@@ -1692,16 +1877,26 @@ class CreatorsTabWidget(QWidget):
         self.sync_progress.hide()
 
         if success and data:
-            self.all_creators = [
-                c for c in data
-                if (c.get("service") or "").lower().strip() in SUPPORTED_PLATFORMS
-            ]
+            norm = []
+            for c in data:
+                if isinstance(c, dict):
+                    svc = (c.get("service") or "").lower().strip()
+                    if svc in SUPPORTED_PLATFORMS:
+                        c["_svc"] = svc
+                        c["_sname"] = (c.get("name") or "").lower()
+                        c["_sid"] = str(c.get("id") or "").strip()
+                        c["_fav"] = int(c.get("favorited") or 0)
+                        c["_upd"] = int(c.get("updated") or 0)
+                        norm.append(c)
+            self.all_creators = norm
+            self._default_creators = list(norm)
+            self._default_creators.sort(key=lambda c: (-c.get("_fav", 0), c.get("_sname", "")))
             self._apply_filter()
             if hasattr(self.parent_app, 'creator_name_cache') and isinstance(self.parent_app.creator_name_cache, dict):
                 for c in self.all_creators:
-                    cid = str(c.get("id", "")).strip()
+                    cid = c.get("_sid", "")
                     cname = (c.get("name") or "").strip()
-                    csvc = (c.get("service") or "").lower().strip()
+                    csvc = c.get("_svc", "")
                     if cid and cname:
                         if csvc:
                             self.parent_app.creator_name_cache[(csvc, cid)] = cname

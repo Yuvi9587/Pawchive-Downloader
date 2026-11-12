@@ -2891,13 +2891,6 @@ class PostProcessorWorker:
                         total_skipped_this_post += skip_count
                         if original_kept_flag and dl_count > 0 and actual_filename_saved:
                             kept_original_filenames_for_log.append(actual_filename_saved)
-                        if dl_count > 0 and actual_filename_saved:
-                            self._emit_signal('file_successfully_downloaded', {
-                                'disk_filename': actual_filename_saved,
-                                'api_original_filename': actual_filename_saved,
-                                'creator_display_name': creator_display,
-                                'download_path': self.override_output_dir or self.download_root
-                            })
                         if status == FILE_DOWNLOAD_STATUS_SKIPPED:
                             self._emit_signal('file_skipped', actual_filename_saved or "unknown")
                         elif status == FILE_DOWNLOAD_STATUS_FAILED_RETRYABLE_LATER and details_for_dialog_or_retry:

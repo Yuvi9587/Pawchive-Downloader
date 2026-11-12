@@ -222,6 +222,7 @@ class _PostRevisionsFetchWorker(QThread):
 
 class _ThumbTaskSignals(QObject):
     loaded = Signal(int, str, str)  # index, thumb_url, disk_path
+    finished = Signal(int)          # index
 
 
 class _ThumbDownloadTask(QRunnable):
@@ -247,22 +248,49 @@ class _ThumbDownloadTask(QRunnable):
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
                     "Referer": "https://pawchive.pw/"
                 }
-                r = requests.get(self.url, headers=headers, timeout=10)
-                if self.generation != self.get_current_gen():
-                    return
-                if r.status_code == 200 and r.content:
-                    # Offload thumbnail decoding and resizing to background thread using PIL
+                urls_to_try = [self.url]
+                if "img.pawchive.pw" in self.url:
+                    urls_to_try.append(self.url.replace("img.pawchive.pw", "img.kemono.su"))
+                elif "img.kemono.su" in self.url:
+                    urls_to_try.append(self.url.replace("img.kemono.su", "img.pawchive.pw"))
+
+                for u in urls_to_try:
+                    if self.generation != self.get_current_gen():
+                        return
                     try:
-                        from PIL import Image
-                        import io
-                        im = Image.open(io.BytesIO(r.content))
-                        im.thumbnail((180, 180), Image.Resampling.LANCZOS)
-                        if im.mode in ("RGBA", "P"):
-                            im = im.convert("RGB")
-                        im.save(self.disk_path, format="JPEG", quality=85)
+                        r = requests.get(u, headers=headers, timeout=12)
+                        if r.status_code == 200 and r.content and len(r.content) > 100:
+                            temp_path = self.disk_path + f".tmp.{os.getpid()}"
+                            try:
+                                from PIL import Image
+                                import io
+                                im = Image.open(io.BytesIO(r.content))
+                                # Only downscale if source image is excessively large (e.g. raw 4K fallback)
+                                if max(im.size) > 1200:
+                                    im.thumbnail((1200, 1200), Image.Resampling.LANCZOS)
+                                    if im.mode in ("RGBA", "P"):
+                                        im = im.convert("RGB")
+                                    im.save(temp_path, format="JPEG", quality=92)
+                                else:
+                                    # Native CDN thumbnail (e.g. 800px): preserve 100% original sharpness & quality
+                                    with open(temp_path, "wb") as f:
+                                        f.write(r.content)
+                            except Exception:
+                                with open(temp_path, "wb") as f:
+                                    f.write(r.content)
+
+                            if os.path.exists(self.disk_path):
+                                try:
+                                    os.remove(self.disk_path)
+                                except OSError:
+                                    pass
+                            try:
+                                os.rename(temp_path, self.disk_path)
+                            except OSError:
+                                pass
+                            break
                     except Exception:
-                        with open(self.disk_path, "wb") as f:
-                            f.write(r.content)
+                        continue
 
             if self.generation != self.get_current_gen():
                 return
@@ -271,6 +299,11 @@ class _ThumbDownloadTask(QRunnable):
                 self.signals.loaded.emit(self.index, self.url, self.disk_path)
         except Exception:
             pass
+        finally:
+            try:
+                self.signals.finished.emit(self.index)
+            except Exception:
+                pass
 
 
 
@@ -289,6 +322,15 @@ class _NoHorizontalScrollArea(QScrollArea):
         super().ensureWidgetVisible(childWidget, 0, yMargin)
         if self.horizontalScrollBar().value() != 0:
             self.horizontalScrollBar().setValue(0)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        cb = getattr(self, "on_resized_callback", None)
+        if cb:
+            try:
+                cb()
+            except Exception:
+                pass
 
 
 class _ResponsiveStackedWidget(QStackedWidget):
@@ -440,9 +482,23 @@ class _SidebarMediaCard(QFrame):
         if w > 20 and self.raw_fname:
             self.name_lbl.setText(fm.elidedText(self.raw_fname, Qt.TextElideMode.ElideRight, max(w, 20)))
 
+    def unload_thumbnail(self):
+        """Unloads the pixmap to reclaim memory when the card scrolls out of view."""
+        if not getattr(self, "_has_loaded_thumb", False):
+            return
+        self._has_loaded_thumb = False
+        scale = self.scale
+        kind = self.item.get("kind", "file")
+        svg_file = "assets/uisvg/video.svg" if kind in ("video", "gif") else ("assets/uisvg/image.svg" if kind == "image" else "assets/uisvg/attach.svg")
+        self.thumb_lbl.setPixmap(QIcon(get_asset_path(svg_file)).pixmap(int(22 * scale), int(22 * scale)))
+        self.idx_badge.adjustSize()
+        self.idx_badge.raise_()
+        self.kind_badge.raise_()
+
     def set_thumbnail_pixmap(self, pix: QPixmap):
         if not pix or pix.isNull():
             return
+        self._has_loaded_thumb = True
         w = max(int(88 * self.scale), self.thumb_container.width())
         h = max(int(60 * self.scale), self.thumb_container.height())
         scaled = pix.scaled(
@@ -722,6 +778,68 @@ class CommentCardWidget(QFrame):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  Poll Choice Row Widget
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _PollChoiceRow(QWidget):
+    """
+    Renders an individual poll choice with an integrated proportional progress fill bar,
+    choice text label, and vote count / percentage tooltip.
+    """
+    def __init__(self, text: str, votes: int, total_votes: int, is_winner: bool = False, scale: float = 1.0, parent=None):
+        super().__init__(parent)
+        self.text = text
+        self.votes = votes
+        self.total_votes = total_votes
+        self.is_winner = is_winner
+        self.scale = scale
+        self.pct = (votes / total_votes) if total_votes > 0 else 0.0
+
+        self.setFixedHeight(int(32 * scale))
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(int(12 * scale), 0, int(12 * scale), 0)
+        layout.setSpacing(int(8 * scale))
+
+        self.lbl_text = QLabel(text, self)
+        self.lbl_text.setStyleSheet("color: #DFE1E5; font-size: 9pt; font-weight: 500; background: transparent;")
+        layout.addWidget(self.lbl_text, 1)
+
+        pct_str = f"{self.pct * 100:.1f}%" if total_votes > 0 else "0%"
+        self.lbl_votes = QLabel(f"{votes:,}", self)
+        self.lbl_votes.setToolTip(f"{votes:,} votes ({pct_str})")
+        self.lbl_votes.setStyleSheet(
+            "color: #FFFFFF; font-size: 8.5pt; font-weight: bold; background: transparent;" if is_winner else
+            "color: #C5CAD3; font-size: 8.5pt; font-weight: 500; background: transparent;"
+        )
+        layout.addWidget(self.lbl_votes)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        w = self.width()
+        h = self.height()
+        r = int(4 * self.scale)
+
+        # 1. Base choice outline & dark background
+        painter.setPen(QPen(QColor("#343844"), 1))
+        painter.setBrush(QBrush(QColor("#18191E")))
+        painter.drawRoundedRect(1, 1, w - 2, h - 2, r, r)
+
+        # 2. Percentage fill bar
+        if self.pct > 0:
+            fill_w = max(int(6 * self.scale), int((w - 2) * self.pct))
+            fill_color = QColor("#4A373E") if self.is_winner else QColor("#3E414A")
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(fill_color))
+            painter.drawRoundedRect(1, 1, fill_w, h - 2, r, r)
+
+        painter.end()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  Full In-App Post Detail View
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -755,6 +873,7 @@ class PostDetailView(QWidget):
         self.is_sidebar_visible = True
 
         # Background stream, comment, and post detail workers
+        self._active_workers = set()
         self.comments_worker = None
         self.stream_worker = None
         self.post_worker = None
@@ -775,8 +894,13 @@ class PostDetailView(QWidget):
 
         # Thumbnail task signals for carousel & gallery cards
         self._thumb_generation = 0
+        self._pending_thumb_indices = set()
+        self._sidebar_scroll_timer = QTimer(self)
+        self._sidebar_scroll_timer.setSingleShot(True)
+        self._sidebar_scroll_timer.timeout.connect(self._update_visible_sidebar_thumbnails)
         self.thumb_signals = _ThumbTaskSignals(parent=self)
         self.thumb_signals.loaded.connect(self._on_item_thumb_loaded)
+        self.thumb_signals.finished.connect(self._on_item_thumb_finished)
 
         if self.media_manager:
             try:
@@ -801,6 +925,32 @@ class PostDetailView(QWidget):
         os.makedirs(self.thumbs_cache_dir, exist_ok=True)
 
         self._build_ui()
+
+    def _cancel_and_detach_worker(self, attr_name: str):
+        """Cancels a worker and detaches its signals safely without dropping reference while running."""
+        worker = getattr(self, attr_name, None)
+        if worker:
+            setattr(self, attr_name, None)
+            try:
+                worker.cancel()
+            except Exception:
+                pass
+            for sig_name in ("finished", "progress", "comments_loaded", "comments_failed", "revisions_loaded", "revisions_failed", "post_loaded"):
+                if hasattr(worker, sig_name):
+                    try:
+                        getattr(worker, sig_name).disconnect()
+                    except Exception:
+                        pass
+
+    def _track_worker(self, worker, attr_name: str):
+        """Retains a strong reference to worker in _active_workers until it finishes to prevent C++ abort."""
+        self._cancel_and_detach_worker(attr_name)
+        if not hasattr(self, "_active_workers"):
+            self._active_workers = set()
+        self._active_workers.add(worker)
+        worker.finished.connect(lambda w=worker: self._active_workers.discard(w))
+        setattr(self, attr_name, worker)
+        return worker
 
     def _build_ui(self):
         scale = self.scale
@@ -1107,7 +1257,59 @@ class PostDetailView(QWidget):
         self.desc_browser.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         d_layout.addWidget(self.desc_browser)
 
+        self.desc_card.setVisible(False)
         self.content_layout.addWidget(self.desc_card)
+
+        # ── B2. Poll Section (if post has a poll) ─────────────────────────────
+        self.poll_section_widget = QWidget(self.scroll_content)
+        self.poll_section_widget.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        self.poll_section_widget.setMaximumWidth(int(680 * scale))
+        psw_layout = QVBoxLayout(self.poll_section_widget)
+        psw_layout.setContentsMargins(0, int(4 * scale), 0, int(8 * scale))
+        psw_layout.setSpacing(int(8 * scale))
+
+        self.poll_sec_lbl = QLabel("Poll", self.poll_section_widget)
+        self.poll_sec_lbl.setStyleSheet("font-size: 13pt; font-weight: bold; color: #FFFFFF; border: none; background: transparent;")
+        psw_layout.addWidget(self.poll_sec_lbl)
+
+        self.poll_card = QFrame(self.poll_section_widget)
+        self.poll_card.setObjectName("pollCard")
+        self.poll_card.setStyleSheet(
+            "QFrame#pollCard { background-color: #17181C; border: 1px solid #2B2E38; border-radius: 8px; }"
+        )
+        p_layout = QVBoxLayout(self.poll_card)
+        p_layout.setContentsMargins(int(16 * scale), int(14 * scale), int(16 * scale), int(14 * scale))
+        p_layout.setSpacing(int(10 * scale))
+
+        # Poll Title inside card
+        self.poll_title_lbl = QLabel(self.poll_card)
+        self.poll_title_lbl.setStyleSheet("font-size: 10.5pt; font-weight: bold; color: #FFFFFF; border: none; background: transparent;")
+        self.poll_title_lbl.setWordWrap(True)
+        p_layout.addWidget(self.poll_title_lbl)
+
+        # Poll Description (if provided)
+        self.poll_desc_lbl = QLabel(self.poll_card)
+        self.poll_desc_lbl.setStyleSheet("font-size: 9pt; color: #9AA0A6; border: none; background: transparent; line-height: 1.4;")
+        self.poll_desc_lbl.setWordWrap(True)
+        self.poll_desc_lbl.setVisible(False)
+        p_layout.addWidget(self.poll_desc_lbl)
+
+        # Choices container
+        self.poll_choices_container = QWidget(self.poll_card)
+        self.poll_choices_container.setStyleSheet("background: transparent; border: none;")
+        self.poll_choices_layout = QVBoxLayout(self.poll_choices_container)
+        self.poll_choices_layout.setContentsMargins(0, int(2 * scale), 0, int(2 * scale))
+        self.poll_choices_layout.setSpacing(int(6 * scale))
+        p_layout.addWidget(self.poll_choices_container)
+
+        # Footer info: Date range, total votes, status
+        self.poll_footer_lbl = QLabel(self.poll_card)
+        self.poll_footer_lbl.setStyleSheet("font-size: 8pt; color: #8C929E; border: none; background: transparent;")
+        p_layout.addWidget(self.poll_footer_lbl)
+
+        psw_layout.addWidget(self.poll_card)
+        self.poll_section_widget.setVisible(False)
+        self.content_layout.addWidget(self.poll_section_widget)
 
         # ── C. Embedded In-App Media Player & Gallery ─────────────────────────
         self.media_card = QFrame(self.scroll_content)
@@ -1534,6 +1736,8 @@ class PostDetailView(QWidget):
         self.sidebar_items_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         self.sidebar_scroll.setWidget(self.sidebar_content)
+        self.sidebar_scroll.verticalScrollBar().valueChanged.connect(self._on_sidebar_scrolled)
+        self.sidebar_scroll.on_resized_callback = lambda: self._sidebar_scroll_timer.start(50)
         sb_layout.addWidget(self.sidebar_scroll)
 
         body_layout.addWidget(self.sidebar_frame, 0)
@@ -1547,10 +1751,11 @@ class PostDetailView(QWidget):
     def load_post(self, post: dict, all_posts: list = None):
         """Populates the post detail view with post content, embedded media, and comments."""
         self._thumb_generation += 1
+        self._pending_thumb_indices.clear()
+        if hasattr(self, "_sidebar_scroll_timer"):
+            self._sidebar_scroll_timer.stop()
         self._loaded_full_res_indices = set()
-        if hasattr(self, "batch_hd_worker") and self.batch_hd_worker and self.batch_hd_worker.isRunning():
-            self.batch_hd_worker.cancel()
-        self.batch_hd_worker = None
+        self._cancel_and_detach_worker("batch_hd_worker")
 
         self.post = post or {}
         self.all_posts = all_posts or []
@@ -1558,14 +1763,7 @@ class PostDetailView(QWidget):
         self.is_viewing_revision = False
         self.revisions_data = []
 
-        if hasattr(self, "revisions_worker") and self.revisions_worker and self.revisions_worker.isRunning():
-            self.revisions_worker.cancel()
-            try:
-                self.revisions_worker.revisions_loaded.disconnect()
-                self.revisions_worker.revisions_failed.disconnect()
-            except Exception:
-                pass
-        self.revisions_worker = None
+        self._cancel_and_detach_worker("revisions_worker")
 
         if hasattr(self, "revision_combo"):
             self.revision_combo.blockSignals(True)
@@ -1598,12 +1796,7 @@ class PostDetailView(QWidget):
         self._fetch_comments()
 
         # Asynchronously fetch full post detail
-        if self.post_worker and self.post_worker.isRunning():
-            self.post_worker.cancel()
-            try:
-                self.post_worker.post_loaded.disconnect()
-            except Exception:
-                pass
+        self._cancel_and_detach_worker("post_worker")
 
         svc = (
             self.post.get("_creator_service")
@@ -1612,18 +1805,40 @@ class PostDetailView(QWidget):
         ).lower().strip()
         cid = str(self.post.get("_creator_id") or self.post.get("user") or "").strip()
         if svc and cid and pid:
-            self.post_worker = _PostDetailFetchWorker(svc, cid, pid, self.cache_dir, self)
-            self.post_worker.post_loaded.connect(self._on_full_post_loaded)
-            self.post_worker.start()
+            worker = _PostDetailFetchWorker(svc, cid, pid, self.cache_dir, self)
+            self._track_worker(worker, "post_worker")
+            worker.post_loaded.connect(self._on_full_post_loaded)
+            worker.start()
 
             # Asynchronously fetch revision history
-            self.revisions_worker = _PostRevisionsFetchWorker(svc, cid, pid, self.cache_dir, self)
-            self.revisions_worker.revisions_loaded.connect(self._on_revisions_loaded)
-            self.revisions_worker.revisions_failed.connect(self._on_revisions_failed)
-            self.revisions_worker.start()
+            rev_worker = _PostRevisionsFetchWorker(svc, cid, pid, self.cache_dir, self)
+            self._track_worker(rev_worker, "revisions_worker")
+            rev_worker.revisions_loaded.connect(self._on_revisions_loaded)
+            rev_worker.revisions_failed.connect(self._on_revisions_failed)
+            rev_worker.start()
 
         # Scroll to top
         self.scroll_area.verticalScrollBar().setValue(0)
+
+    @staticmethod
+    def _has_visible_description(raw_html: str) -> bool:
+        """Returns True if the description string contains visible text, embedded media, or clickable links."""
+        if not raw_html or not str(raw_html).strip():
+            return False
+        clean = str(raw_html).strip()
+        if clean.lower() in ("none", "null", "undefined"):
+            return False
+        # If media elements or embedded objects exist (e.g. img, video, audio, iframe)
+        if re.search(r"<(img|video|audio|iframe|embed|object|svg)\b", clean, re.IGNORECASE):
+            return True
+        # If an actual link exists with a valid destination
+        if re.search(r"<a\s+[^>]*href=[\"'][^\"']+[\"']", clean, re.IGNORECASE):
+            return True
+        # Strip HTML tags
+        text = re.sub(r"<[^>]*>", "", clean)
+        # Strip common HTML whitespace entities (&nbsp;, &#160;, etc.)
+        text = re.sub(r"&(?:nbsp|#160|#xA0|amp|quot|lt|gt|#39);", " ", text, flags=re.IGNORECASE)
+        return bool(text.strip())
 
     def _apply_post_data_to_view(self, post_data: dict, is_revision: bool = False):
         """Applies title, dates, tags, description, and media items for current post or revision."""
@@ -1679,7 +1894,7 @@ class PostDetailView(QWidget):
 
         # 2. Description
         content = (post_data.get("content") or "").strip()
-        if content:
+        if self._has_visible_description(content):
             self.desc_card.setVisible(True)
             self.desc_browser.setHtml(
                 f"<div style='color: #DFE1E5; font-size: 9.5pt; line-height: 1.5; font-family: Segoe UI, sans-serif;'>"
@@ -1690,6 +1905,19 @@ class PostDetailView(QWidget):
             QTimer.singleShot(20, self._update_desc_height)
         else:
             self.desc_card.setVisible(False)
+            self.desc_browser.clear()
+
+        # 2b. Poll Section
+        poll_data = post_data.get("poll")
+        if poll_data and isinstance(poll_data, dict) and poll_data.get("choices"):
+            self._update_poll_section(poll_data)
+            if hasattr(self, "poll_section_widget"):
+                self.poll_section_widget.setVisible(True)
+            self.poll_card.setVisible(True)
+        else:
+            if hasattr(self, "poll_section_widget"):
+                self.poll_section_widget.setVisible(False)
+            self.poll_card.setVisible(False)
 
         # 3. Extract and load media
         self.media_items = extract_media_items_from_post(post_data)
@@ -1840,6 +2068,7 @@ class PostDetailView(QWidget):
                 "published": rev.get("published") or self.original_full_post.get("published"),
                 "edited": rev.get("edited") or self.original_full_post.get("edited"),
                 "added": rev.get("added") or self.original_full_post.get("added"),
+                "poll": rev.get("poll") if "poll" in rev else self.original_full_post.get("poll"),
                 "revision_id": rev_id,
                 "_is_revision": True,
             })
@@ -1897,6 +2126,20 @@ class PostDetailView(QWidget):
                     self.parent_app.favorite_download_queue.append(queue_item)
                     queued_count += 1
             if queued_count > 0:
+                if hasattr(self.parent_app, "queue_tab") and self.parent_app.queue_tab:
+                    try:
+                        self.parent_app.queue_tab.on_files_queued([
+                            {
+                                "filename": att.get("name") or "file",
+                                "creator": cname,
+                                "post_title": self.post.get("title") or "",
+                                "post_id": str(self.post.get("id") or ""),
+                                "size": att.get("size") or 0
+                            }
+                            for att in self.media_items if att.get("url")
+                        ])
+                    except Exception:
+                        pass
                 if hasattr(self.parent_app, "_process_next_favorite_download"):
                     if not getattr(self.parent_app, "is_processing_favorites_queue", False):
                         self.parent_app._process_next_favorite_download()
@@ -1983,6 +2226,17 @@ class PostDetailView(QWidget):
                 "fallback_urls": att.get("fallback_urls") or []
             }
             self.parent_app.favorite_download_queue.append(queue_item)
+            if hasattr(self.parent_app, "queue_tab") and self.parent_app.queue_tab:
+                try:
+                    self.parent_app.queue_tab.on_files_queued([{
+                        "filename": name,
+                        "creator": cname,
+                        "post_title": self.post.get("title") or "",
+                        "post_id": str(self.post.get("id") or ""),
+                        "size": att.get("size") or 0
+                    }])
+                except Exception:
+                    pass
             if hasattr(self.parent_app, "log_signal"):
                 self.parent_app.log_signal.emit(f"Queued file '{name}' for download.")
             if hasattr(self.parent_app, "_process_next_favorite_download"):
@@ -2076,6 +2330,8 @@ class PostDetailView(QWidget):
                 "border-radius: 5px; font-size: 8.5pt; font-weight: bold; padding: 4px 10px; }"
                 "QPushButton:hover { background-color: #422626; }"
             )
+            self._update_visible_sidebar_thumbnails()
+            QTimer.singleShot(0, self._update_visible_sidebar_thumbnails)
         else:
             self.toggle_sidebar_btn.setStyleSheet(
                 "QPushButton { background-color: #242730; color: #DFE1E5; border: 1px solid #363A45; "
@@ -2092,6 +2348,7 @@ class PostDetailView(QWidget):
     def _populate_sidebar(self):
         # Clear existing cards
         self.sidebar_cards = []
+        self._pending_thumb_indices.clear()
         while self.sidebar_items_layout.count():
             item = self.sidebar_items_layout.takeAt(0)
             if item.widget():
@@ -2116,29 +2373,118 @@ class PostDetailView(QWidget):
             self.sidebar_items_layout.addWidget(card)
             self.sidebar_cards.append(card)
 
-            # Check thumb (only fetch thumbnails for images; never download external drive or video files as thumbnails)
-            is_cloud = item.get("is_cloud_link", False)
-            kind = item.get("kind", "file")
-            thumb_url = item.get("thumb_url")
-            if not thumb_url and kind == "image" and not is_cloud:
-                thumb_url = item.get("url")
-
-            if thumb_url and not is_cloud:
-                t_hash = hashlib.md5(thumb_url.encode("utf-8")).hexdigest() + ".jpg"
-                t_path = os.path.join(self.thumbs_cache_dir, t_hash)
-                if os.path.exists(t_path):
-                    card.set_thumbnail_pixmap(QPixmap(t_path))
-                else:
-                    task = _ThumbDownloadTask(
-                        idx, thumb_url, t_path,
-                        self._thumb_generation,
-                        lambda: self._thumb_generation,
-                        self.thumb_signals
-                    )
-                    QThreadPool.globalInstance().start(task)
-
         if 0 <= self.current_media_index < len(self.sidebar_cards):
             self.sidebar_cards[self.current_media_index].set_active(True)
+
+        try:
+            self.sidebar_content.adjustSize()
+        except Exception:
+            pass
+
+        # Lazy viewport thumbnail loading: Only load thumbnails that are currently visible on screen
+        self._update_visible_sidebar_thumbnails()
+        QTimer.singleShot(0, self._update_visible_sidebar_thumbnails)
+
+    def _on_sidebar_scrolled(self, value: int):
+        if hasattr(self, "_sidebar_scroll_timer"):
+            self._sidebar_scroll_timer.start(50)
+
+    def _is_sidebar_card_visible(self, index: int, buffer: int = None) -> bool:
+        cards = getattr(self, "sidebar_cards", [])
+        if not (0 <= index < len(cards)):
+            return False
+        if not getattr(self, "is_sidebar_visible", True):
+            return False
+
+        card = cards[index]
+        scale = getattr(self, "scale", 1.0)
+        if buffer is None:
+            buffer = int(250 * scale)
+
+        v_scroll = self.sidebar_scroll.verticalScrollBar().value()
+        v_h = self.sidebar_scroll.viewport().height()
+        if v_h <= 50:
+            v_h = max(self.height(), int(650 * scale))
+
+        range_min = max(0, v_scroll - buffer)
+        range_max = v_scroll + v_h + buffer
+
+        card_top = card.y()
+        card_h = card.height() or int(74 * scale)
+        if card_top == 0 and index > 0:
+            step = int(74 * scale) + int(8 * scale)
+            card_top = int(10 * scale) + index * step
+
+        card_bottom = card_top + card_h
+        return (card_bottom >= range_min and card_top <= range_max)
+
+    def _update_visible_sidebar_thumbnails(self):
+        cards = getattr(self, "sidebar_cards", [])
+        if not cards or not getattr(self, "is_sidebar_visible", True):
+            return
+
+        scale = getattr(self, "scale", 1.0)
+        buffer = int(250 * scale)
+        v_scroll = self.sidebar_scroll.verticalScrollBar().value()
+        v_h = self.sidebar_scroll.viewport().height()
+        if v_h <= 50:
+            v_h = max(self.height(), int(650 * scale))
+
+        range_min = max(0, v_scroll - buffer)
+        range_max = v_scroll + v_h + buffer
+
+        step = int(74 * scale) + int(8 * scale)
+        margin_top = int(10 * scale)
+        card_h = int(74 * scale)
+
+        for idx, card in enumerate(cards):
+            card_top = card.y()
+            if card_top == 0 and idx > 0:
+                card_top = margin_top + idx * step
+            card_bottom = card_top + card_h
+
+            is_visible = (card_bottom >= range_min and card_top <= range_max)
+
+            if is_visible:
+                if not getattr(card, "_has_loaded_thumb", False):
+                    item = self.media_items[idx] if idx < len(self.media_items) else {}
+                    is_cloud = item.get("is_cloud_link", False)
+                    kind = item.get("kind", "file")
+                    thumb_url = item.get("thumb_url")
+                    if not thumb_url and kind == "image" and not is_cloud:
+                        thumb_url = item.get("url")
+
+                    if thumb_url and not is_cloud:
+                        t_hash = hashlib.md5(thumb_url.encode("utf-8")).hexdigest() + ".jpg"
+                        t_path = os.path.join(self.thumbs_cache_dir, t_hash)
+                        loaded_from_disk = False
+                        if os.path.exists(t_path):
+                            pix = QPixmap(t_path)
+                            if not pix.isNull() and max(pix.width(), pix.height()) > 200:
+                                card.set_thumbnail_pixmap(pix)
+                                loaded_from_disk = True
+                            else:
+                                try:
+                                    os.remove(t_path)
+                                except OSError:
+                                    pass
+
+                        if not loaded_from_disk:
+                            if idx not in self._pending_thumb_indices:
+                                self._pending_thumb_indices.add(idx)
+                                task = _ThumbDownloadTask(
+                                    idx, thumb_url, t_path,
+                                    self._thumb_generation,
+                                    lambda: self._thumb_generation,
+                                    self.thumb_signals
+                                )
+                                QThreadPool.globalInstance().start(task)
+            else:
+                if getattr(card, "_has_loaded_thumb", False):
+                    card.unload_thumbnail()
+
+    def _on_item_thumb_finished(self, index: int):
+        self._pending_thumb_indices.discard(index)
 
     def _on_item_thumb_loaded(self, index: int, thumb_url: str, disk_path: str):
         if not os.path.exists(disk_path):
@@ -2147,10 +2493,13 @@ class PostDetailView(QWidget):
         if pix.isNull():
             return
 
-        # Direct O(1) index update to avoid iterating and lagging the GUI thread
+        self._pending_thumb_indices.discard(index)
+
+        # Direct O(1) index update if card is visible or within preload margin
         cards = getattr(self, "sidebar_cards", [])
         if 0 <= index < len(cards):
-            cards[index].set_thumbnail_pixmap(pix)
+            if self._is_sidebar_card_visible(index, buffer=int(350 * getattr(self, "scale", 1.0))):
+                cards[index].set_thumbnail_pixmap(pix)
 
         buttons = getattr(self, "thumb_buttons", [])
         sz = int(52 * self.scale)
@@ -2257,6 +2606,7 @@ class PostDetailView(QWidget):
             if 0 <= index < len(self.sidebar_cards):
                 try:
                     self.sidebar_scroll.ensureWidgetVisible(self.sidebar_cards[index])
+                    self._update_visible_sidebar_thumbnails()
                 except Exception:
                     pass
 
@@ -2280,7 +2630,7 @@ class PostDetailView(QWidget):
         self.video_player.stop_and_release()
         self.gif_player.stop()
 
-        self.zoom_ctrl_frame.setVisible(kind == "image")
+        self.zoom_ctrl_frame.setVisible(kind in ("image", "gif"))
 
         url = item["url"]
         ext = item.get("ext", ".bin")
@@ -2291,13 +2641,31 @@ class PostDetailView(QWidget):
         # Check if preview thumbnail is cached to display immediately
         preview_pix = None
         thumb_url = item.get("thumb_url")
-        if thumb_url:
+        if not thumb_url and kind == "image" and not item.get("is_cloud_link", False):
+            thumb_url = item.get("url")
+
+        if thumb_url and not item.get("is_cloud_link", False):
             t_hash = hashlib.md5(thumb_url.encode("utf-8")).hexdigest() + ".jpg"
             t_path = os.path.join(self.thumbs_cache_dir, t_hash)
             if os.path.exists(t_path):
                 p = QPixmap(t_path)
-                if not p.isNull():
+                if not p.isNull() and max(p.width(), p.height()) > 200:
                     preview_pix = p
+                else:
+                    try:
+                        os.remove(t_path)
+                    except OSError:
+                        pass
+            if not preview_pix:
+                if index not in self._pending_thumb_indices:
+                    self._pending_thumb_indices.add(index)
+                    task = _ThumbDownloadTask(
+                        index, thumb_url, t_path,
+                        self._thumb_generation,
+                        lambda: self._thumb_generation,
+                        self.thumb_signals
+                    )
+                    QThreadPool.globalInstance().start(task)
 
         if kind == "video":
             self.embedded_viewer_stack.setCurrentIndex(0)
@@ -2321,7 +2689,11 @@ class PostDetailView(QWidget):
 
             self._update_hd_btn_state(False)
             self.media_progress_bar.setVisible(False)
-            self.image_view.set_preview_thumbnail(preview_pix, fit_to_view=True)
+            if preview_pix:
+                self.image_view.set_preview_thumbnail(preview_pix, fit_to_view=True)
+            else:
+                self.image_view.set_preview_thumbnail(None, fit_to_view=True)
+                self.image_view.show_loading("Loading Preview...")
             if getattr(self, "is_expanded_view", False):
                 self._update_expanded_height(preview_pix)
 
@@ -2417,21 +2789,15 @@ class PostDetailView(QWidget):
         self.media_progress_bar.setValue(0)
         self.media_progress_bar.setVisible(True)
 
-        if self.stream_worker and self.stream_worker.isRunning():
-            self.stream_worker.cancel()
-            try:
-                self.stream_worker.progress.disconnect()
-                self.stream_worker.finished.disconnect()
-            except Exception:
-                pass
-            self.stream_worker = None
+        self._cancel_and_detach_worker("stream_worker")
 
         fallbacks = item.get("fallback_urls", [])
-        self.stream_worker = _MediaStreamWorker(url, disk_path, fallback_urls=fallbacks, parent=self)
-        self.stream_worker.progress.connect(self._on_stream_progress)
-        self.stream_worker.progress.connect(lambda pct: self.image_view.set_loading_progress(pct))
-        self.stream_worker.finished.connect(self._on_image_download_finished)
-        self.stream_worker.start()
+        worker = _MediaStreamWorker(url, disk_path, fallback_urls=fallbacks, parent=self)
+        self._track_worker(worker, "stream_worker")
+        worker.progress.connect(self._on_stream_progress)
+        worker.progress.connect(lambda pct: self.image_view.set_loading_progress(pct))
+        worker.finished.connect(self._on_image_download_finished)
+        worker.start()
 
     def _on_gif_play_requested(self):
         if not self.media_items or self.current_media_index < 0 or self.current_media_index >= len(self.media_items):
@@ -2449,26 +2815,23 @@ class PostDetailView(QWidget):
         if os.path.exists(disk_path) and os.path.getsize(disk_path) > 128:
             self.gif_player.load_gif(disk_path)
             self.media_progress_bar.setVisible(False)
+            if getattr(self, "is_expanded_view", False):
+                sz = self.gif_player.get_native_size()
+                self._update_expanded_height_for_size(sz.width(), sz.height())
             return
 
         self.gif_player.show_loading("Loading Animated GIF (0%)...")
         self.media_progress_bar.setValue(0)
         self.media_progress_bar.setVisible(True)
 
-        if self.stream_worker and self.stream_worker.isRunning():
-            self.stream_worker.cancel()
-            try:
-                self.stream_worker.progress.disconnect()
-                self.stream_worker.finished.disconnect()
-            except Exception:
-                pass
-            self.stream_worker = None
+        self._cancel_and_detach_worker("stream_worker")
 
         fallbacks = item.get("fallback_urls", [])
-        self.stream_worker = _MediaStreamWorker(url, disk_path, fallback_urls=fallbacks, parent=self)
-        self.stream_worker.progress.connect(self._on_stream_progress)
-        self.stream_worker.finished.connect(self._on_gif_download_finished)
-        self.stream_worker.start()
+        worker = _MediaStreamWorker(url, disk_path, fallback_urls=fallbacks, parent=self)
+        self._track_worker(worker, "stream_worker")
+        worker.progress.connect(self._on_stream_progress)
+        worker.finished.connect(self._on_gif_download_finished)
+        worker.start()
 
     def _on_stream_progress(self, percent: int):
         self.media_progress_bar.setValue(percent)
@@ -2552,11 +2915,12 @@ class PostDetailView(QWidget):
         self.media_progress_bar.setValue(0)
         self.media_progress_bar.setVisible(True)
 
-        self.batch_hd_worker = _BatchHDLoaderWorker(image_tasks, parent=self)
-        self.batch_hd_worker.item_loaded.connect(self._on_batch_hd_item_loaded)
-        self.batch_hd_worker.progress.connect(self._on_batch_hd_progress)
-        self.batch_hd_worker.all_finished.connect(self._on_batch_hd_finished)
-        self.batch_hd_worker.start()
+        worker = _BatchHDLoaderWorker(image_tasks, parent=self)
+        self._track_worker(worker, "batch_hd_worker")
+        worker.item_loaded.connect(self._on_batch_hd_item_loaded)
+        worker.progress.connect(self._on_batch_hd_progress)
+        worker.all_finished.connect(self._on_batch_hd_finished)
+        worker.start()
 
     def _on_batch_hd_item_loaded(self, idx: int, disk_path: str):
         self._loaded_full_res_indices.add(idx)
@@ -2599,6 +2963,9 @@ class PostDetailView(QWidget):
         self.media_progress_bar.setVisible(False)
         if success and os.path.exists(disk_path):
             self.gif_player.load_gif(disk_path)
+            if getattr(self, "is_expanded_view", False):
+                sz = self.gif_player.get_native_size()
+                self._update_expanded_height_for_size(sz.width(), sz.height())
         else:
             self.gif_player.stop()
 
@@ -2609,8 +2976,12 @@ class PostDetailView(QWidget):
             self.z_expand_btn.setStyleSheet(
                 "QPushButton { background-color: #352020; color: #E5A198; border: 1px solid #E5A198; border-radius: 4px; font-size: 8pt; font-weight: bold; padding: 2px 6px; }"
             )
-            pix = getattr(self.image_view, "_pixmap", None)
-            self._update_expanded_height(pix)
+            if self.embedded_viewer_stack.currentIndex() == 2:
+                sz = self.gif_player.get_native_size()
+                self._update_expanded_height_for_size(sz.width(), sz.height())
+            else:
+                pix = getattr(self.image_view, "_pixmap", None)
+                self._update_expanded_height(pix)
         else:
             self.z_expand_btn.setText(" Full View")
             self.z_expand_btn.setStyleSheet("")
@@ -2618,11 +2989,21 @@ class PostDetailView(QWidget):
             self.embedded_viewer_stack.setMinimumHeight(base_h)
             self.embedded_viewer_stack.setMaximumHeight(16777215)
             self.embedded_viewer_stack.setFixedHeight(base_h)
-            self.image_view.fit_in_window()
+            if self.embedded_viewer_stack.currentIndex() == 2:
+                self.gif_player.fit_in_window()
+            else:
+                self.image_view.fit_in_window()
         if hasattr(self, "scroll_area"):
             self.scroll_area.horizontalScrollBar().setValue(0)
 
     def _update_expanded_height(self, pixmap: QPixmap = None):
+        if not getattr(self, "is_expanded_view", False):
+            return
+        w = pixmap.width() if pixmap and not pixmap.isNull() else 0
+        h = pixmap.height() if pixmap and not pixmap.isNull() else 0
+        self._update_expanded_height_for_size(w, h)
+
+    def _update_expanded_height_for_size(self, w: int = 0, h: int = 0):
         if not getattr(self, "is_expanded_view", False):
             return
         base_h = int(580 * self.scale)
@@ -2633,17 +3014,17 @@ class PostDetailView(QWidget):
         else:
             avail_w = max(300, self.embedded_viewer_stack.width() - 20)
 
-        if pixmap and not pixmap.isNull():
-            w = pixmap.width()
-            h = pixmap.height()
-            if w > 0:
-                calc_h = int(avail_w * (h / w))
-                target_h = max(base_h, min(calc_h, int(1800 * self.scale)))
-                self.embedded_viewer_stack.setFixedHeight(target_h)
-                QTimer.singleShot(60, self.image_view.fit_in_window)
-                return
+        is_gif = (self.embedded_viewer_stack.currentIndex() == 2)
+        fit_fn = self.gif_player.fit_in_window if is_gif else self.image_view.fit_in_window
+
+        if w > 0 and h > 0:
+            calc_h = int(avail_w * (h / w))
+            target_h = max(base_h, min(calc_h, int(1800 * self.scale)))
+            self.embedded_viewer_stack.setFixedHeight(target_h)
+            QTimer.singleShot(60, fit_fn)
+            return
         self.embedded_viewer_stack.setFixedHeight(int(850 * self.scale))
-        QTimer.singleShot(60, self.image_view.fit_in_window)
+        QTimer.singleShot(60, fit_fn)
 
     def _open_fullscreen_viewer(self):
         if not self.post:
@@ -2668,21 +3049,36 @@ class PostDetailView(QWidget):
         dlg.exec()
 
     def _zoom_in(self):
-        self.image_view.zoom_in()
+        if self.embedded_viewer_stack.currentIndex() == 2:
+            self.gif_player.zoom_in()
+        else:
+            self.image_view.zoom_in()
 
     def _zoom_out(self):
-        self.image_view.zoom_out()
+        if self.embedded_viewer_stack.currentIndex() == 2:
+            self.gif_player.zoom_out()
+        else:
+            self.image_view.zoom_out()
 
     def _zoom_fit(self):
         if hasattr(self, "scroll_area"):
             self.scroll_area.horizontalScrollBar().setValue(0)
-        self.image_view.fit_in_window()
+        if self.embedded_viewer_stack.currentIndex() == 2:
+            self.gif_player.fit_in_window()
+        else:
+            self.image_view.fit_in_window()
 
     def _zoom_actual(self):
-        self.image_view.set_actual_size()
+        if self.embedded_viewer_stack.currentIndex() == 2:
+            self.gif_player.set_actual_size()
+        else:
+            self.image_view.set_actual_size()
 
     def _zoom_rotate(self):
-        self.image_view.rotate_cw()
+        if self.embedded_viewer_stack.currentIndex() == 2:
+            self.gif_player.rotate_cw()
+        else:
+            self.image_view.rotate_cw()
 
     # ─────────────────────────────────────────────────────────────────────────
     #  Comments
@@ -2718,21 +3114,15 @@ class PostDetailView(QWidget):
         cid = str(self.post.get("_creator_id") or self.post.get("user") or "").strip()
         pid = str(self.post.get("id") or "").strip()
 
-        if self.comments_worker and self.comments_worker.isRunning():
-            self.comments_worker.cancel()
-            try:
-                self.comments_worker.comments_loaded.disconnect()
-                self.comments_worker.comments_failed.disconnect()
-            except Exception:
-                pass
-            self.comments_worker = None
+        self._cancel_and_detach_worker("comments_worker")
 
-        self.comments_worker = _CommentsFetchWorker(
+        worker = _CommentsFetchWorker(
             svc, cid, pid, self.comments_cache_dir, self
         )
-        self.comments_worker.comments_loaded.connect(self._on_comments_loaded)
-        self.comments_worker.comments_failed.connect(self._on_comments_failed)
-        self.comments_worker.start()
+        self._track_worker(worker, "comments_worker")
+        worker.comments_loaded.connect(self._on_comments_loaded)
+        worker.comments_failed.connect(self._on_comments_failed)
+        worker.start()
 
     def _on_comments_loaded(self, comments: list):
         if not comments:
@@ -3026,6 +3416,73 @@ class PostDetailView(QWidget):
         self.desc_browser.setFixedHeight(max(int(24 * self.scale), doc_h + int(6 * self.scale)))
         self.desc_card.adjustSize()
 
+    def _update_poll_section(self, poll: dict):
+        """Populates the poll title, choices with vote percentages, and footer date/votes info."""
+        if not hasattr(self, "poll_card"):
+            return
+
+        # 1. Title
+        title = (poll.get("title") or "Poll").strip()
+        self.poll_title_lbl.setText(title)
+
+        # 2. Description
+        desc = (poll.get("description") or "").strip()
+        if desc:
+            self.poll_desc_lbl.setText(desc)
+            self.poll_desc_lbl.setVisible(True)
+        else:
+            self.poll_desc_lbl.setVisible(False)
+
+        # 3. Clear existing choice rows
+        while self.poll_choices_layout.count():
+            item = self.poll_choices_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        # 4. Choices
+        choices = poll.get("choices") or []
+        total_votes = sum(int(c.get("votes") or 0) for c in choices)
+        max_votes = max((int(c.get("votes") or 0) for c in choices), default=0)
+
+        for c in choices:
+            text = str(c.get("text") or "Option").strip()
+            votes = int(c.get("votes") or 0)
+            is_winner = (votes == max_votes and max_votes > 0)
+            row = _PollChoiceRow(
+                text=text,
+                votes=votes,
+                total_votes=total_votes,
+                is_winner=is_winner,
+                scale=self.scale,
+                parent=self.poll_choices_container
+            )
+            self.poll_choices_layout.addWidget(row)
+
+        # 5. Footer info
+        created_raw = poll.get("created_at") or self.post.get("published") or ""
+        created = str(created_raw).split("T")[0] if created_raw else ""
+        closes_raw = poll.get("closes_at")
+        closes = str(closes_raw).split("T")[0] if closes_raw else ""
+
+        parts = []
+        if created and closes:
+            parts.append(f"{created} — {closes}")
+        elif created:
+            parts.append(f"Started: {created}")
+        elif closes:
+            parts.append(f"Closes: {closes}")
+
+        parts.append(f"{total_votes:,} votes")
+
+        if poll.get("allow_multiple"):
+            parts.append("Multiple choices allowed")
+
+        footer_text = " | ".join(parts[:2])
+        if len(parts) > 2:
+            footer_text += " • " + " • ".join(parts[2:])
+
+        self.poll_footer_lbl.setText(footer_text)
+
     def keyPressEvent(self, event):
         key = event.key()
         if key == Qt.Key.Key_Escape or key == Qt.Key.Key_Back:
@@ -3044,26 +3501,28 @@ class PostDetailView(QWidget):
                 super().keyPressEvent(event)
         elif key == Qt.Key.Key_0:
             self._zoom_fit()
+        elif key in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
+            self._zoom_in()
+        elif key == Qt.Key.Key_Minus:
+            self._zoom_out()
         elif key == Qt.Key.Key_F:
             self._open_fullscreen_viewer()
         elif key == Qt.Key.Key_R:
             self._zoom_rotate()
+        elif key == Qt.Key.Key_Space:
+            if self.embedded_viewer_stack.currentIndex() == 1:
+                self.video_player._toggle_play()
+            elif self.embedded_viewer_stack.currentIndex() == 2:
+                self.gif_player._toggle_play()
         else:
             super().keyPressEvent(event)
 
     def close(self):
-        if self.post_worker and self.post_worker.isRunning():
-            self.post_worker.cancel()
-        if self.comments_worker and self.comments_worker.isRunning():
-            self.comments_worker.cancel()
-        if self.stream_worker and self.stream_worker.isRunning():
-            self.stream_worker.cancel()
-            try:
-                self.stream_worker.progress.disconnect()
-                self.stream_worker.finished.disconnect()
-            except Exception:
-                pass
-            self.stream_worker = None
+        self._cancel_and_detach_worker("post_worker")
+        self._cancel_and_detach_worker("comments_worker")
+        self._cancel_and_detach_worker("stream_worker")
+        self._cancel_and_detach_worker("batch_hd_worker")
+        self._cancel_and_detach_worker("revisions_worker")
         self.video_player.stop_and_release()
         self.gif_player.stop()
         super().close()

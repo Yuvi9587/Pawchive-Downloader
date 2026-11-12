@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
     QWidget, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QSlider, QStackedWidget, QFrame, QScrollArea, QApplication,
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsItem,
-    QProgressBar, QSizePolicy, QToolTip, QMessageBox
+    QProgressBar, QSizePolicy, QToolTip, QMessageBox, QComboBox
 )
 from PySide6.QtCore import (
     Qt, QSize, QUrl, Signal, QThread, QPoint, QRectF, QTimer, QObject, QEvent
@@ -100,26 +100,30 @@ def normalize_media_url(path: str, temp_url: str = None, server: str = None) -> 
 def normalize_thumb_url(path: str, temp_url: str = None) -> str:
     """
     Constructs thumbnail preview URL with Pawchive shard stripping.
+    Prefers canonical archive path for CDN thumbnails.
     """
+    if path:
+        if path.startswith("http://") or path.startswith("https://"):
+            if "/thumbnail/data/" in path:
+                return path
+            if "/data/" in path:
+                sub = path[path.find("/data/") + 6:]
+                return _normalize_kemono_thumb_subpath(sub)
+            return path
+        if path.startswith("//"):
+            return f"https:{path}"
+
+        clean = path.lstrip('/')
+        if clean.startswith("thumbnail/data/"):
+            clean = clean[len("thumbnail/data/"):]
+        elif clean.startswith("data/"):
+            clean = clean[len("data/"):]
+
+        return _normalize_kemono_thumb_subpath(clean)
+
     if temp_url:
         return temp_url
-    if not path:
-        return ""
-    if path.startswith("http://") or path.startswith("https://"):
-        if "/data/" in path:
-            sub = path[path.find("/data/") + 6:]
-            return _normalize_kemono_thumb_subpath(sub)
-        return path
-    if path.startswith("//"):
-        return f"https:{path}"
-
-    clean = path.lstrip('/')
-    if clean.startswith("thumbnail/data/"):
-        clean = clean[len("thumbnail/data/"):]
-    elif clean.startswith("data/"):
-        clean = clean[len("data/"):]
-
-    return _normalize_kemono_thumb_subpath(clean)
+    return ""
 
 
 def extract_media_items_from_post(post: dict) -> list:
@@ -708,7 +712,7 @@ class ImageZoomView(QGraphicsView):
 
     def __init__(self, parent=None, scale: float = 1.0):
         super().__init__(parent)
-        self.scale = scale
+        self.ui_scale = scale
         self.scene = QGraphicsScene(self)
         self.setScene(self.scene)
         self.pixmap_item = QGraphicsPixmapItem()
@@ -1443,22 +1447,62 @@ class VideoPlayerWidget(QWidget):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Animated GIF Player (Click-to-Load/Play with Poster Thumbnail & Overlay)
+#  Animated GIF Player (Hardware-Accelerated Aspect Ratio & Frame Controls)
 # ─────────────────────────────────────────────────────────────────────────────
 
-class _ClickablePreviewContainer(QWidget):
+class _GifCanvasView(QGraphicsView):
+    """
+    Smooth, hardware-accelerated canvas for animated GIFs with pan-drag,
+    wheel zoom, and click-to-play support with strict aspect ratio preservation.
+    """
     clicked = Signal()
+    double_clicked = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setBackgroundBrush(QBrush(QColor("#0E1015")))
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self._drag_start = None
+        self._dragged = False
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            self.clicked.emit()
+            self._drag_start = event.pos()
+            self._dragged = False
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_start and (event.pos() - self._drag_start).manhattanLength() > 5:
+            self._dragged = True
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        super().mouseReleaseEvent(event)
+        if event.button() == Qt.MouseButton.LeftButton:
+            if not self._dragged:
+                self.clicked.emit()
+            self._drag_start = None
+            self._dragged = False
+
+    def mouseDoubleClickEvent(self, event):
+        self.double_clicked.emit()
 
 
 class GifPlayerWidget(QWidget):
     """
-    Smooth animated GIF playback with click-to-load/play, responsive scaling,
-    frame control, looping, and visual loading progress indicator.
+    Comprehensive Animated GIF Player:
+    - Never stretches or distorts portrait or landscape GIFs (100% aspect ratio preserved)
+    - Full playback controls: Play/Pause, Step Back/Forward (-1/+1 frame), Restart, Speed selection
+    - Interactive viewer controls: Fit, 1:1 Actual Resolution, Zoom In/Out, Rotate 90°
+    - Detailed frame status: Frame X/Y, native dimensions, portrait/landscape badge, speed
+    - Smooth mouse-wheel zooming and hand drag pan
     """
     play_requested = Signal()
     fullscreen_requested = Signal()
@@ -1466,11 +1510,16 @@ class GifPlayerWidget(QWidget):
     def __init__(self, parent=None, scale: float = 1.0):
         super().__init__(parent)
         self.scale = scale
+        self.ui_scale = scale
         self._url: str = ""
         self._disk_path: str = ""
         self._fallback_urls: list = []
         self._preview_pixmap: QPixmap | None = None
         self._is_loaded: bool = False
+        self._is_fitted: bool = True
+        self._zoom_factor: float = 1.0
+        self._rotation_angle: int = 0
+        self._native_size: QSize = QSize(0, 0)
 
         self._build_ui()
 
@@ -1480,25 +1529,19 @@ class GifPlayerWidget(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # 1. Preview & Movie Container (Clickable)
-        self.container = _ClickablePreviewContainer(self)
-        self.container.setStyleSheet("background-color: #0E1015;")
-        self.container.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.container.clicked.connect(self._on_container_clicked)
+        # 1. Canvas View & Scene
+        self.canvas = _GifCanvasView(self)
+        self.scene = QGraphicsScene(self.canvas)
+        self.pixmap_item = QGraphicsPixmapItem()
+        self.pixmap_item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
+        self.scene.addItem(self.pixmap_item)
+        self.canvas.setScene(self.scene)
 
-        c_layout = QVBoxLayout(self.container)
-        c_layout.setContentsMargins(0, 0, 0, 0)
-        c_layout.setSpacing(0)
-
-        self.label = QLabel(self.container)
-        self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.label.setStyleSheet("background-color: #0E1015;")
-        c_layout.addWidget(self.label, 1)
-
-        self.movie = QMovie(self)
+        self.canvas.clicked.connect(self._on_container_clicked)
+        self.canvas.double_clicked.connect(self._on_double_clicked)
 
         # Centered "PLAY GIF" Overlay Button
-        self.overlay_btn = QPushButton("  GIF  ", self.container)
+        self.overlay_btn = QPushButton("  GIF  ", self.canvas.viewport())
         self.overlay_btn.setObjectName("gifPlayOverlayBtn")
         self.overlay_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.overlay_btn.setIcon(QIcon(get_asset_path("assets/Svg/play.svg")))
@@ -1522,58 +1565,84 @@ class GifPlayerWidget(QWidget):
         self.overlay_btn.clicked.connect(self._on_container_clicked)
 
         # Loading / Buffering Spinner Overlay
-        self.loading_overlay = VideoLoadingOverlay(self.container)
+        self.loading_overlay = VideoLoadingOverlay(self.canvas.viewport())
 
-        root.addWidget(self.container, 1)
+        root.addWidget(self.canvas, 1)
 
         # 2. Bottom Control Strip
         controls = QFrame(self)
         controls.setStyleSheet("background-color: #16181F; border-top: 1px solid #2B2E38;")
         ctrl_h = QHBoxLayout(controls)
-        ctrl_h.setContentsMargins(int(12 * scale), int(6 * scale), int(12 * scale), int(6 * scale))
-        ctrl_h.setSpacing(int(8 * scale))
+        ctrl_h.setContentsMargins(int(10 * scale), int(5 * scale), int(10 * scale), int(5 * scale))
+        ctrl_h.setSpacing(int(6 * scale))
 
+        btn_style = (
+            "QPushButton { background-color: #242730; color: #DFE1E5; border: 1px solid #363A45; "
+            "border-radius: 4px; font-size: 8.5pt; font-weight: 500; padding: 3px 8px; } "
+            "QPushButton:hover { background-color: #2F333E; color: #FFFFFF; border-color: #E5A198; } "
+            "QPushButton:disabled { background-color: #1A1C22; color: #555A66; border-color: #2A2D36; }"
+        )
+
+        # Play / Pause button
         self.play_btn = QPushButton("  Play GIF")
         self.play_btn.setIcon(QIcon(get_asset_path("assets/uisvg/play.svg")))
         self.play_btn.setIconSize(QSize(int(12 * scale), int(12 * scale)))
         self.play_btn.setFixedHeight(int(26 * scale))
-        self.play_btn.setStyleSheet(
-            "QPushButton { background-color: #242730; color: #DFE1E5; border: 1px solid #363A45; border-radius: 4px; font-size: 8.5pt; padding: 4px 10px; }"
-            "QPushButton:hover { background-color: #2F333E; color: #FFFFFF; border-color: #E5A198; }"
-        )
+        self.play_btn.setStyleSheet(btn_style)
         self.play_btn.clicked.connect(self._toggle_play)
         ctrl_h.addWidget(self.play_btn)
 
+        # Restart button
         self.restart_btn = QPushButton("  Restart")
         self.restart_btn.setIcon(QIcon(get_asset_path("assets/Svg2/repeat.svg")))
-        self.restart_btn.setIconSize(QSize(int(13 * scale), int(13 * scale)))
+        self.restart_btn.setIconSize(QSize(int(12 * scale), int(12 * scale)))
         self.restart_btn.setFixedHeight(int(26 * scale))
-        self.restart_btn.setStyleSheet(
-            "QPushButton { background-color: #242730; color: #DFE1E5; border: 1px solid #363A45; border-radius: 4px; font-size: 8.5pt; padding: 4px 10px; }"
-            "QPushButton:hover { background-color: #2F333E; color: #FFFFFF; border-color: #E5A198; }"
-        )
+        self.restart_btn.setStyleSheet(btn_style)
         self.restart_btn.clicked.connect(self._restart)
         ctrl_h.addWidget(self.restart_btn)
 
-        self.fs_btn = QPushButton()
-        self.fs_btn.setIcon(QIcon(get_asset_path("assets/Svg/fullscreen.svg")))
-        self.fs_btn.setIconSize(QSize(int(13 * scale), int(13 * scale)))
-        self.fs_btn.setFixedSize(int(26 * scale), int(26 * scale))
-        self.fs_btn.setToolTip("Toggle Fullscreen")
-        self.fs_btn.setStyleSheet(
-            "QPushButton { background-color: #242730; color: #DFE1E5; border: 1px solid #363A45; border-radius: 4px; padding: 4px; }"
-            "QPushButton:hover { background-color: #2F333E; color: #FFFFFF; border-color: #E5A198; }"
+        # Step -1 Frame
+        self.step_back_btn = QPushButton("◀|")
+        self.step_back_btn.setFixedSize(int(28 * scale), int(26 * scale))
+        self.step_back_btn.setToolTip("Step 1 Frame Backward")
+        self.step_back_btn.setStyleSheet(btn_style)
+        self.step_back_btn.clicked.connect(self.step_back)
+        ctrl_h.addWidget(self.step_back_btn)
+
+        # Step +1 Frame
+        self.step_fwd_btn = QPushButton("|▶")
+        self.step_fwd_btn.setFixedSize(int(28 * scale), int(26 * scale))
+        self.step_fwd_btn.setToolTip("Step 1 Frame Forward")
+        self.step_fwd_btn.setStyleSheet(btn_style)
+        self.step_fwd_btn.clicked.connect(self.step_forward)
+        ctrl_h.addWidget(self.step_fwd_btn)
+
+        # Speed Dropdown
+        self.speed_combo = QComboBox()
+        self.speed_combo.addItems(["0.25x", "0.5x", "0.75x", "1.0x", "1.25x", "1.5x", "2.0x"])
+        self.speed_combo.setCurrentText("1.0x")
+        self.speed_combo.setFixedHeight(int(26 * scale))
+        self.speed_combo.setToolTip("Playback Speed")
+        self.speed_combo.setStyleSheet(
+            "QComboBox { background: #242730; border: 1px solid #363A45; border-radius: 4px; "
+            "color: #DFE1E5; padding: 2px 6px; font-size: 8pt; font-weight: bold; } "
+            "QComboBox QAbstractItemView { background: #242730; color: #FFFFFF; selection-background-color: #3B82F6; }"
         )
-        self.fs_btn.clicked.connect(self.fullscreen_requested.emit)
-        ctrl_h.addWidget(self.fs_btn)
+        self.speed_combo.currentTextChanged.connect(self._on_speed_changed)
+        ctrl_h.addWidget(self.speed_combo)
 
         ctrl_h.addStretch(1)
 
+        # Frame counter & details label
         self.info_lbl = QLabel("Animated GIF • Click to play")
         self.info_lbl.setStyleSheet("color: #8C929E; font-size: 8pt; font-weight: bold;")
         ctrl_h.addWidget(self.info_lbl)
 
         root.addWidget(controls)
+
+        # Movie controller
+        self.movie = QMovie(self)
+        self.movie.frameChanged.connect(self._on_frame_changed)
 
     def _on_container_clicked(self):
         if not self._is_loaded or self.movie.state() == QMovie.MovieState.NotRunning:
@@ -1581,14 +1650,147 @@ class GifPlayerWidget(QWidget):
         else:
             self._toggle_play()
 
+    def _on_double_clicked(self):
+        if not self._is_loaded:
+            self.play_requested.emit()
+            return
+        if self._is_fitted:
+            self.set_actual_size()
+        else:
+            self.fit_in_window()
+
+    def _on_frame_changed(self, frame_no: int):
+        pm = self.movie.currentPixmap()
+        if not pm.isNull():
+            self.pixmap_item.setPixmap(pm)
+        self._update_info_label()
+
+    def _on_speed_changed(self, speed_text: str):
+        speeds = {"0.25x": 25, "0.5x": 50, "0.75x": 75, "1.0x": 100, "1.25x": 125, "1.5x": 150, "2.0x": 200}
+        percent = speeds.get(speed_text, 100)
+        self.movie.setSpeed(percent)
+        self._update_info_label()
+
+    def step_forward(self):
+        if not self._is_loaded or self.movie.state() == QMovie.MovieState.NotRunning:
+            if self._disk_path and os.path.exists(self._disk_path) and os.path.getsize(self._disk_path) > 128:
+                self.load_gif(self._disk_path)
+                self.pause()
+            else:
+                self.play_requested.emit()
+                return
+        self.pause()
+        cur = self.movie.currentFrameNumber()
+        tot = self.movie.frameCount()
+
+        # If already at the last frame and total count is known, wrap back to 0
+        if tot > 0 and cur >= tot - 1:
+            self.movie.jumpToFrame(0)
+        else:
+            if not self.movie.jumpToNextFrame():
+                self.movie.jumpToFrame(0)
+
+        pm = self.movie.currentPixmap()
+        if not pm.isNull():
+            self.pixmap_item.setPixmap(pm)
+        self._update_info_label()
+
+    def step_back(self):
+        if not self._is_loaded or self.movie.state() == QMovie.MovieState.NotRunning:
+            if self._disk_path and os.path.exists(self._disk_path) and os.path.getsize(self._disk_path) > 128:
+                self.load_gif(self._disk_path)
+                self.pause()
+            else:
+                self.play_requested.emit()
+                return
+        self.pause()
+        cur = self.movie.currentFrameNumber()
+        tot = self.movie.frameCount()
+
+        if tot > 0:
+            target = (cur - 1) % tot
+        else:
+            target = max(0, cur - 1)
+
+        if target == cur:
+            return
+
+        if target < cur:
+            # QMovie cannot jump backwards to non-zero frames directly;
+            # must rewind to 0 then advance forward to target frame
+            self.movie.jumpToFrame(0)
+            if target > 0:
+                while self.movie.currentFrameNumber() < target:
+                    if not self.movie.jumpToNextFrame():
+                        break
+        else:
+            # Wrap-around from 0 to last frame
+            while self.movie.currentFrameNumber() < target:
+                if not self.movie.jumpToNextFrame():
+                    break
+
+        pm = self.movie.currentPixmap()
+        if not pm.isNull():
+            self.pixmap_item.setPixmap(pm)
+        self._update_info_label()
+
+    def fit_in_window(self):
+        """Fits image in current viewport preserving aspect ratio (never stretches)."""
+        self.canvas.resetTransform()
+        self._zoom_factor = 1.0
+        self._rotation_angle = 0
+        self._is_fitted = True
+        if not self.pixmap_item.pixmap().isNull():
+            self.canvas.fitInView(self.pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
+
+    def set_actual_size(self):
+        """Renders image at 100% 1:1 original native resolution."""
+        self.canvas.resetTransform()
+        self._zoom_factor = 1.0
+        self._is_fitted = False
+        if self._rotation_angle:
+            self.canvas.rotate(self._rotation_angle)
+
+    def zoom_in(self):
+        self._is_fitted = False
+        if self._zoom_factor < 20.0:
+            self.canvas.scale(1.2, 1.2)
+            self._zoom_factor *= 1.2
+
+    def zoom_out(self):
+        self._is_fitted = False
+        if self._zoom_factor > 0.05:
+            self.canvas.scale(1 / 1.2, 1 / 1.2)
+            self._zoom_factor /= 1.2
+
+    def rotate_cw(self):
+        self._rotation_angle = (self._rotation_angle + 90) % 360
+        self.canvas.rotate(90)
+
+    def wheelEvent(self, event):
+        if not self.pixmap_item.pixmap().isNull():
+            delta = event.angleDelta().y()
+            if delta > 0:
+                self.zoom_in()
+            elif delta < 0:
+                self.zoom_out()
+        else:
+            super().wheelEvent(event)
+
+    def get_native_size(self) -> QSize:
+        return self._native_size
+
+    def get_current_pixmap(self) -> QPixmap:
+        return self.pixmap_item.pixmap()
+
     def set_media(self, url: str, disk_path: str = "", preview_pixmap: QPixmap = None, fallback_urls: list = None):
         """Prepares the player in static poster / thumbnail mode without auto-downloading full GIF."""
         self.movie.stop()
-        self.label.setMovie(None)
         self._url = url
         self._disk_path = disk_path
         self._fallback_urls = fallback_urls or []
         self._is_loaded = False
+        self._native_size = QSize(0, 0)
 
         if not preview_pixmap and disk_path and os.path.exists(disk_path) and os.path.getsize(disk_path) > 128:
             try:
@@ -1604,13 +1806,12 @@ class GifPlayerWidget(QWidget):
 
         self.overlay_btn.setVisible(True)
         self.overlay_btn.raise_()
-        self.container.setCursor(Qt.CursorShape.PointingHandCursor)
         self.loading_overlay.stop_loading()
 
         self.play_btn.setEnabled(True)
         self.play_btn.setIcon(QIcon(get_asset_path("assets/uisvg/play.svg")))
         self.play_btn.setText("  Play GIF")
-        self.info_lbl.setText("Animated GIF • Click to play")
+        self._update_info_label()
         self._reposition_overlays()
 
     def set_preview_pixmap(self, pixmap: QPixmap):
@@ -1639,27 +1840,23 @@ class GifPlayerWidget(QWidget):
         self._is_loaded = True
         self.loading_overlay.stop_loading()
         self.overlay_btn.setVisible(False)
-        self.container.setCursor(Qt.CursorShape.ArrowCursor)
         self.play_btn.setEnabled(True)
 
         self.movie.stop()
         self.movie.setFileName(file_path)
-
-        # Scale movie frames to fit container
-        self.movie.jumpToFrame(0)
-        pm = self.movie.currentPixmap()
-        if not pm.isNull() and pm.width() > 0 and pm.height() > 0:
-            avail = self.container.size()
-            scaled_sz = pm.size().scaled(avail, Qt.AspectRatioMode.KeepAspectRatio)
-            if scaled_sz.width() > 0 and scaled_sz.height() > 0:
-                self.movie.setScaledSize(scaled_sz)
-
-        self.label.setMovie(self.movie)
         self.movie.start()
+        self.movie.jumpToFrame(0)
+
+        pm = self.movie.currentPixmap()
+        if not pm.isNull() and pm.width() > 0:
+            self._native_size = pm.size()
+            self.pixmap_item.setPixmap(pm)
+            self.scene.setSceneRect(QRectF(pm.rect()))
+            self.fit_in_window()
 
         self.play_btn.setIcon(QIcon(get_asset_path("assets/Svg/pause.svg")))
         self.play_btn.setText("  Pause")
-        self.info_lbl.setText("Animated GIF (Playing)")
+        self._update_info_label()
 
     def stop(self):
         """Stops movie and resets back to thumbnail poster if available."""
@@ -1667,13 +1864,13 @@ class GifPlayerWidget(QWidget):
         self.loading_overlay.stop_loading()
         self.overlay_btn.setVisible(True)
         self.overlay_btn.raise_()
-        self.container.setCursor(Qt.CursorShape.PointingHandCursor)
         self.play_btn.setEnabled(True)
         self.play_btn.setIcon(QIcon(get_asset_path("assets/uisvg/play.svg")))
         self.play_btn.setText("  Play GIF")
-        self.info_lbl.setText("Animated GIF • Click to play")
         if self._preview_pixmap:
             self._update_preview_display()
+        else:
+            self._update_info_label()
 
     def play(self):
         if not self._is_loaded or self.movie.state() == QMovie.MovieState.NotRunning:
@@ -1682,14 +1879,14 @@ class GifPlayerWidget(QWidget):
         self.movie.setPaused(False)
         self.play_btn.setIcon(QIcon(get_asset_path("assets/Svg/pause.svg")))
         self.play_btn.setText("  Pause")
-        self.info_lbl.setText("Animated GIF (Playing)")
+        self._update_info_label()
 
     def pause(self):
         if self.movie.state() == QMovie.MovieState.Running and not self.movie.state() == QMovie.MovieState.Paused:
             self.movie.setPaused(True)
             self.play_btn.setIcon(QIcon(get_asset_path("assets/uisvg/play.svg")))
             self.play_btn.setText("  Play")
-            self.info_lbl.setText("Animated GIF (Paused)")
+            self._update_info_label()
 
     def _toggle_play(self):
         if not self._is_loaded or self.movie.state() == QMovie.MovieState.NotRunning:
@@ -1707,7 +1904,7 @@ class GifPlayerWidget(QWidget):
         self.movie.start()
         self.play_btn.setIcon(QIcon(get_asset_path("assets/Svg/pause.svg")))
         self.play_btn.setText("  Pause")
-        self.info_lbl.setText("Animated GIF (Playing)")
+        self._update_info_label()
 
     def is_playing(self) -> bool:
         return self._is_loaded and self.movie.state() == QMovie.MovieState.Running and not self.movie.state() == QMovie.MovieState.Paused
@@ -1715,44 +1912,54 @@ class GifPlayerWidget(QWidget):
     def is_loaded(self) -> bool:
         return self._is_loaded
 
+    def _update_info_label(self):
+        if not self._is_loaded or self.movie.state() == QMovie.MovieState.NotRunning:
+            if self._native_size.isValid() and self._native_size.width() > 0:
+                w, h = self._native_size.width(), self._native_size.height()
+                orientation = "Portrait" if h > w else "Landscape"
+                self.info_lbl.setText(f"Animated GIF • {w}×{h} ({orientation}) • Click to play")
+            else:
+                self.info_lbl.setText("Animated GIF • Click to play")
+            return
+
+        cur = self.movie.currentFrameNumber() + 1
+        tot = self.movie.frameCount()
+        frame_str = f"Frame {cur}/{tot}" if tot > 0 else f"Frame {cur}"
+        w = self._native_size.width()
+        h = self._native_size.height()
+        dim_str = f" • {w}×{h}" if w > 0 else ""
+        orientation = f" ({'Portrait' if h > w else 'Landscape'})" if (w > 0 and h > 0) else ""
+        speed = self.speed_combo.currentText()
+        state = "Paused" if self.movie.state() == QMovie.MovieState.Paused else "Playing"
+        self.info_lbl.setText(f"{frame_str}{dim_str}{orientation} • {speed} [{state}]")
+
     def _update_preview_display(self):
         if self._preview_pixmap and not self._preview_pixmap.isNull():
-            avail_w = max(50, self.container.width() - 20)
-            avail_h = max(50, self.container.height() - 20)
-            scaled = self._preview_pixmap.scaled(
-                avail_w, avail_h,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation
-            )
-            self.label.setMovie(None)
-            self.label.setPixmap(scaled)
+            self._native_size = self._preview_pixmap.size()
+            self.pixmap_item.setPixmap(self._preview_pixmap)
+            self.scene.setSceneRect(QRectF(self._preview_pixmap.rect()))
+            self.fit_in_window()
         else:
-            self.label.setMovie(None)
-            self.label.setPixmap(QPixmap())
+            self.pixmap_item.setPixmap(QPixmap())
+            self.scene.setSceneRect(QRectF(0, 0, 100, 100))
+        self._update_info_label()
 
     def _reposition_overlays(self):
-        if hasattr(self, "overlay_btn") and hasattr(self, "container"):
+        if hasattr(self, "overlay_btn") and hasattr(self, "canvas"):
             btn_w = self.overlay_btn.sizeHint().width() + int(36 * self.scale)
             btn_h = int(44 * self.scale)
             self.overlay_btn.resize(btn_w, btn_h)
-            cx = (self.container.width() - btn_w) // 2
-            cy = (self.container.height() - btn_h) // 2
+            cx = (self.canvas.viewport().width() - btn_w) // 2
+            cy = (self.canvas.viewport().height() - btn_h) // 2
             self.overlay_btn.move(max(0, cx), max(0, cy))
-        if hasattr(self, "loading_overlay") and hasattr(self, "container"):
-            self.loading_overlay.setGeometry(0, 0, self.container.width(), self.container.height())
+        if hasattr(self, "loading_overlay") and hasattr(self, "canvas"):
+            self.loading_overlay.setGeometry(0, 0, self.canvas.viewport().width(), self.canvas.viewport().height())
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._reposition_overlays()
-        if not self._is_loaded or self.movie.state() == QMovie.MovieState.NotRunning:
-            self._update_preview_display()
-        elif self._is_loaded and self.movie.fileName():
-            pm = self.movie.currentPixmap()
-            if not pm.isNull() and pm.width() > 0 and pm.height() > 0:
-                avail = self.container.size()
-                scaled_sz = pm.size().scaled(avail, Qt.AspectRatioMode.KeepAspectRatio)
-                if scaled_sz.width() > 0 and scaled_sz.height() > 0:
-                    self.movie.setScaledSize(scaled_sz)
+        if getattr(self, "_is_fitted", False):
+            self.fit_in_window()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1858,19 +2065,19 @@ class PawchiveMediaViewerDialog(QDialog):
         self.zoom_out_btn.setIconSize(QSize(int(14 * scale), int(14 * scale)))
         self.zoom_out_btn.setFixedSize(int(26 * scale), int(26 * scale))
         self.zoom_out_btn.setToolTip("Zoom Out (-)")
-        self.zoom_out_btn.clicked.connect(lambda: self.image_view.zoom_out())
+        self.zoom_out_btn.clicked.connect(self._zoom_out_active)
         zb_layout.addWidget(self.zoom_out_btn)
 
         self.fit_btn = QPushButton("Fit")
         self.fit_btn.setFixedHeight(int(26 * scale))
         self.fit_btn.setToolTip("Fit in window (0)")
-        self.fit_btn.clicked.connect(lambda: self.image_view.fit_in_window())
+        self.fit_btn.clicked.connect(self._fit_active)
         zb_layout.addWidget(self.fit_btn)
 
         self.actual_btn = QPushButton("1:1")
         self.actual_btn.setFixedHeight(int(26 * scale))
         self.actual_btn.setToolTip("100% Original Size")
-        self.actual_btn.clicked.connect(lambda: self.image_view.set_actual_size())
+        self.actual_btn.clicked.connect(self._actual_size_active)
         zb_layout.addWidget(self.actual_btn)
 
         self.zoom_in_btn = QPushButton()
@@ -1878,7 +2085,7 @@ class PawchiveMediaViewerDialog(QDialog):
         self.zoom_in_btn.setIconSize(QSize(int(14 * scale), int(14 * scale)))
         self.zoom_in_btn.setFixedSize(int(26 * scale), int(26 * scale))
         self.zoom_in_btn.setToolTip("Zoom In (+)")
-        self.zoom_in_btn.clicked.connect(lambda: self.image_view.zoom_in())
+        self.zoom_in_btn.clicked.connect(self._zoom_in_active)
         zb_layout.addWidget(self.zoom_in_btn)
 
         self.rotate_btn = QPushButton()
@@ -1886,7 +2093,7 @@ class PawchiveMediaViewerDialog(QDialog):
         self.rotate_btn.setIconSize(QSize(int(14 * scale), int(14 * scale)))
         self.rotate_btn.setFixedSize(int(26 * scale), int(26 * scale))
         self.rotate_btn.setToolTip("Rotate 90° (R)")
-        self.rotate_btn.clicked.connect(lambda: self.image_view.rotate_cw())
+        self.rotate_btn.clicked.connect(self._rotate_active)
         zb_layout.addWidget(self.rotate_btn)
 
         top_layout.addWidget(self.zoom_box)
@@ -2104,7 +2311,7 @@ class PawchiveMediaViewerDialog(QDialog):
         kind_label = "Video" if kind == "video" else ("GIF" if kind == "gif" else "Image")
         svg_file = "assets/uisvg/video.svg" if kind in ("video", "gif") else "assets/uisvg/image.svg"
         self.counter_lbl.setText(f"<img src='{get_asset_html_path(svg_file)}' width='13' height='13'> &nbsp;<b>{kind_label}</b> &nbsp;{self.current_index + 1} / {count}")
-        self.zoom_box.setVisible(kind == "image")
+        self.zoom_box.setVisible(kind in ("image", "gif"))
 
         # Update active carousel thumbnail border
         if getattr(self, "thumb_buttons", None) and len(self.thumb_buttons) > self.current_index:
@@ -2522,6 +2729,36 @@ class PawchiveMediaViewerDialog(QDialog):
         else:
             QDesktopServices.openUrl(QUrl(url))
 
+    def _zoom_in_active(self):
+        if self.media_stack.currentIndex() == 2:
+            self.gif_player.zoom_in()
+        else:
+            self.image_view.zoom_in()
+
+    def _zoom_out_active(self):
+        if self.media_stack.currentIndex() == 2:
+            self.gif_player.zoom_out()
+        else:
+            self.image_view.zoom_out()
+
+    def _fit_active(self):
+        if self.media_stack.currentIndex() == 2:
+            self.gif_player.fit_in_window()
+        else:
+            self.image_view.fit_in_window()
+
+    def _actual_size_active(self):
+        if self.media_stack.currentIndex() == 2:
+            self.gif_player.set_actual_size()
+        else:
+            self.image_view.set_actual_size()
+
+    def _rotate_active(self):
+        if self.media_stack.currentIndex() == 2:
+            self.gif_player.rotate_cw()
+        else:
+            self.image_view.rotate_cw()
+
     def keyPressEvent(self, event):
         key = event.key()
         if key == Qt.Key.Key_Escape:
@@ -2549,17 +2786,13 @@ class PawchiveMediaViewerDialog(QDialog):
             elif self.media_stack.currentIndex() == 2:
                 self.gif_player._toggle_play()
         elif key == Qt.Key.Key_Plus or key == Qt.Key.Key_Equal:
-            if self.media_stack.currentIndex() == 1:
-                self.image_view.zoom_in()
+            self._zoom_in_active()
         elif key == Qt.Key.Key_Minus:
-            if self.media_stack.currentIndex() == 1:
-                self.image_view.zoom_out()
+            self._zoom_out_active()
         elif key == Qt.Key.Key_0:
-            if self.media_stack.currentIndex() == 1:
-                self.image_view.fit_in_window()
+            self._fit_active()
         elif key == Qt.Key.Key_R:
-            if self.media_stack.currentIndex() == 1:
-                self.image_view.rotate_cw()
+            self._rotate_active()
         else:
             super().keyPressEvent(event)
 

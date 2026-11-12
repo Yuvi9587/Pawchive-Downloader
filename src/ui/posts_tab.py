@@ -78,23 +78,36 @@ def normalize_pawchive_thumbnail_url(path: str, temp_url: str = None) -> str:
     Normalizes archive file path into Pawchive thumbnail CDN URL.
     Rule: Strips leading storage digit from 3-char hex shard prefix (/25f/ -> /5f/).
     """
+    if path:
+        if path.startswith("http://") or path.startswith("https://"):
+            if "/thumbnail/data/" in path:
+                return path
+            if "/data/" in path:
+                trimmed = path[path.find("/data/") + 6:].lstrip('/')
+                parts = trimmed.split('/', 1)
+                first = parts[0]
+                rest = parts[1] if len(parts) > 1 else ""
+                if len(first) == 3 and first[0].isdigit() and rest:
+                    normalized_path = f"{first[1:]}/{rest}"
+                else:
+                    normalized_path = trimmed
+                return f"https://img.pawchive.pw/thumbnail/data/{normalized_path}"
+            return path
+
+        trimmed = path.lstrip('/')
+        parts = trimmed.split('/', 1)
+        first = parts[0]
+        rest = parts[1] if len(parts) > 1 else ""
+        if len(first) == 3 and first[0].isdigit() and rest:
+            normalized_path = f"{first[1:]}/{rest}"
+        else:
+            normalized_path = trimmed
+
+        return f"https://img.pawchive.pw/thumbnail/data/{normalized_path}"
+
     if temp_url:
         return temp_url
-    if not path:
-        return ""
-    if path.startswith("http://") or path.startswith("https://"):
-        return path
-
-    trimmed = path.lstrip('/')
-    parts = trimmed.split('/', 1)
-    first = parts[0]
-    rest = parts[1] if len(parts) > 1 else ""
-    if len(first) == 3 and first[0].isdigit() and rest:
-        normalized_path = f"{first[1:]}/{rest}"
-    else:
-        normalized_path = trimmed
-
-    return f"https://img.pawchive.pw/thumbnail/data/{normalized_path}"
+    return ""
 
 
 def extract_post_thumbnail_url(post: dict) -> str:
@@ -355,6 +368,45 @@ class PostCardDelegate(QStyledItemDelegate):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+
+        # ── Skeleton Loading Placeholder ──
+        if post.get("_is_skeleton"):
+            scale = self.scale
+            r = QRectF(option.rect).adjusted(int(5 * scale), int(5 * scale), int(-5 * scale), int(-5 * scale))
+            card_w = r.width()
+            card_r = 10.0 * scale
+
+            # Card base container
+            painter.setPen(QPen(QColor("#2A2D36"), 1.0))
+            painter.setBrush(QBrush(QColor("#181A20")))
+            painter.drawRoundedRect(r, card_r, card_r)
+
+            # Thumbnail placeholder
+            card_clip = QPainterPath()
+            card_clip.addRoundedRect(r, card_r, card_r)
+            painter.save()
+            painter.setClipPath(card_clip)
+            thumb_h = int(card_w * 10 / 16)
+            painter.fillRect(QRectF(r.x(), r.y(), card_w, thumb_h), QBrush(QColor("#22252E")))
+            painter.restore()
+
+            # Skeleton title line
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(QColor("#2C2F3A")))
+            title_bar = QRectF(r.x() + int(10 * scale), r.y() + thumb_h + int(12 * scale), card_w - int(20 * scale), int(13 * scale))
+            painter.drawRoundedRect(title_bar, 3 * scale, 3 * scale)
+
+            # Skeleton subtitle line
+            painter.setBrush(QBrush(QColor("#242732")))
+            sub_bar = QRectF(r.x() + int(10 * scale), title_bar.bottom() + int(8 * scale), int(100 * scale), int(10 * scale))
+            painter.drawRoundedRect(sub_bar, 2 * scale, 2 * scale)
+
+            # Skeleton bottom date line
+            date_bar = QRectF(r.x() + int(10 * scale), r.bottom() - int(18 * scale), int(80 * scale), int(9 * scale))
+            painter.drawRoundedRect(date_bar, 2 * scale, 2 * scale)
+
+            painter.restore()
+            return
 
         scale = self.scale
         r = QRectF(option.rect).adjusted(int(5 * scale), int(5 * scale), int(-5 * scale), int(-5 * scale))
@@ -1008,9 +1060,15 @@ class FetchMultipleCreatorPostsThread(QThread):
         self.fetch_all = fetch_all or bool(self.query)
         self.max_pages = max_pages
         self._is_cancelled = False
+        self._scraper = None
 
     def cancel(self):
         self._is_cancelled = True
+        try:
+            if self._scraper is not None:
+                self._scraper.close()
+        except Exception:
+            pass
 
     def run(self):
         if not self.creators:
@@ -1032,49 +1090,96 @@ class FetchMultipleCreatorPostsThread(QThread):
 
         try:
             import cloudscraper
-            scraper = cloudscraper.create_scraper()
+            self._scraper = cloudscraper.create_scraper()
         except Exception:
             import requests
-            scraper = requests
+            self._scraper = requests.Session()
+        scraper = self._scraper
 
-        for idx, creator in enumerate(self.creators, 1):
-            if self._is_cancelled:
-                break
+        try:
+            for idx, creator in enumerate(self.creators, 1):
+                if self._is_cancelled:
+                    break
 
-            if not isinstance(creator, dict):
-                continue
+                if not isinstance(creator, dict):
+                    continue
 
-            svc = (creator.get("service") or "patreon").lower().strip()
-            cid = str(creator.get("id") or "").strip()
-            cname = creator.get("name") or cid or "Creator"
+                svc = (creator.get("service") or "patreon").lower().strip()
+                cid = str(creator.get("id") or "").strip()
+                cname = creator.get("name") or cid or "Creator"
 
-            if not cid:
-                continue
+                if not cid:
+                    continue
 
-            url_type = "server" if svc == "discord" else "user"
-            api_url = f"https://pawchive.pw/api/v1/{svc}/{url_type}/{cid}"
+                url_type = "server" if svc == "discord" else "user"
+                api_url = f"https://pawchive.pw/api/v1/{svc}/{url_type}/{cid}"
 
-            # When searching with a query and fetch_all is enabled, paginate through
-            # all matching pages on Pawchive so user gets complete catalog results
-            if self.query and self.fetch_all:
-                page_offset = 0
-                page_count = 0
-                while not self._is_cancelled and page_count < self.max_pages:
-                    params = {"q": self.query}
-                    if page_offset > 0:
-                        params["o"] = str(page_offset)
+                # When searching with a query and fetch_all is enabled, paginate through
+                # all matching pages on Pawchive so user gets complete catalog results
+                if self.query and self.fetch_all:
+                    page_offset = 0
+                    page_count = 0
+                    while not self._is_cancelled and page_count < self.max_pages:
+                        params = {"q": self.query}
+                        if page_offset > 0:
+                            params["o"] = str(page_offset)
 
-                    if total > 1:
-                        self.status_signal.emit(
-                            f"Searching '{cname}' for '{self.query}' (found {len(all_posts)} posts)..."
-                        )
-                    else:
-                        self.status_signal.emit(
-                            f"Searching all posts for '{self.query}' (found {len(all_posts)})..."
-                        )
+                        if not self._is_cancelled:
+                            if total > 1:
+                                self.status_signal.emit(
+                                    f"Searching '{cname}' for '{self.query}' (found {len(all_posts)} posts)..."
+                                )
+                            else:
+                                self.status_signal.emit(
+                                    f"Searching all posts for '{self.query}' (found {len(all_posts)})..."
+                                )
+
+                        try:
+                            res = scraper.get(api_url, headers=headers, params=params, timeout=20)
+                            if self._is_cancelled:
+                                break
+                            if res.status_code == 200:
+                                data = res.json()
+                                if isinstance(data, list):
+                                    for post in data:
+                                        if isinstance(post, dict):
+                                            post["_creator_name"] = cname
+                                            post["_creator_service"] = svc
+                                            post["_creator_id"] = cid
+                                            all_posts.append(post)
+                                    if len(data) < 50:
+                                        break
+                                    page_offset += 50
+                                    page_count += 1
+                                else:
+                                    break
+                            elif res.status_code == 404:
+                                errors.append(f"{cname}: Creator not found (404)")
+                                break
+                            else:
+                                break
+                        except Exception as e:
+                            if not self._is_cancelled:
+                                errors.append(f"{cname}: {str(e)[:50]}")
+                            break
+                else:
+                    params = {}
+                    if self.query:
+                        params["q"] = self.query
+                    if self.offset > 0:
+                        params["o"] = str(self.offset)
+
+                    if not self._is_cancelled:
+                        if total > 1:
+                            self.status_signal.emit(f"Loading posts for '{cname}' ({idx}/{total})...")
+                        else:
+                            self.status_signal.emit(f"Connecting to Pawchive API for '{cname}' (offset: {self.offset})...")
+                        self.progress_signal.emit(idx, total)
 
                     try:
-                        res = scraper.get(api_url, headers=headers, params=params, timeout=20)
+                        res = scraper.get(api_url, headers=headers, params=params, timeout=25)
+                        if self._is_cancelled:
+                            break
                         if res.status_code == 200:
                             data = res.json()
                             if isinstance(data, list):
@@ -1084,55 +1189,27 @@ class FetchMultipleCreatorPostsThread(QThread):
                                         post["_creator_service"] = svc
                                         post["_creator_id"] = cid
                                         all_posts.append(post)
-                                if len(data) < 50:
-                                    break
-                                page_offset += 50
-                                page_count += 1
                             else:
-                                break
+                                errors.append(f"{cname}: Unexpected response format")
                         elif res.status_code == 404:
                             errors.append(f"{cname}: Creator not found (404)")
-                            break
                         else:
-                            break
+                            errors.append(f"{cname}: HTTP {res.status_code}")
                     except Exception as e:
-                        errors.append(f"{cname}: {str(e)[:50]}")
-                        break
-            else:
-                params = {}
-                if self.query:
-                    params["q"] = self.query
-                if self.offset > 0:
-                    params["o"] = str(self.offset)
-
-                if total > 1:
-                    self.status_signal.emit(f"Loading posts for '{cname}' ({idx}/{total})...")
-                else:
-                    self.status_signal.emit(f"Connecting to Pawchive API for '{cname}' (offset: {self.offset})...")
-                self.progress_signal.emit(idx, total)
-
-                try:
-                    res = scraper.get(api_url, headers=headers, params=params, timeout=25)
-                    if res.status_code == 200:
-                        data = res.json()
-                        if isinstance(data, list):
-                            for post in data:
-                                if isinstance(post, dict):
-                                    post["_creator_name"] = cname
-                                    post["_creator_service"] = svc
-                                    post["_creator_id"] = cid
-                                    all_posts.append(post)
-                        else:
-                            errors.append(f"{cname}: Unexpected response format")
-                    elif res.status_code == 404:
-                        errors.append(f"{cname}: Creator not found (404)")
-                    else:
-                        errors.append(f"{cname}: HTTP {res.status_code}")
-                except Exception as e:
-                    errors.append(f"{cname}: {str(e)[:50]}")
+                        if not self._is_cancelled:
+                            errors.append(f"{cname}: {str(e)[:50]}")
+        except Exception as ex:
+            if not self._is_cancelled:
+                errors.append(f"Network error: {str(ex)[:50]}")
+        finally:
+            try:
+                if self._scraper is not None:
+                    self._scraper.close()
+            except Exception:
+                pass
+            self._scraper = None
 
         if self._is_cancelled:
-            self.finished_signal.emit(False, "Search cancelled.", [])
             return
 
         # Sort combined posts chronologically by published / added date descending
@@ -1619,6 +1696,39 @@ class CreatorPickerDialog(QDialog):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  Responsive Grid View (Auto-reflow on size & layout changes)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _ResponsiveStackedWidget(QStackedWidget):
+    """
+    QStackedWidget whose minimumSizeHint and sizeHint adapt strictly to the active page
+    so that hidden pages with large controls do not constrain parent window resizing.
+    """
+    def sizeHint(self):
+        cw = self.currentWidget()
+        return cw.sizeHint() if cw else super().sizeHint()
+
+    def minimumSizeHint(self):
+        cw = self.currentWidget()
+        return cw.minimumSizeHint() if cw else super().minimumSizeHint()
+
+
+class ResponsiveGridView(QListView):
+    """
+    QListView that triggers responsive column stretching whenever its own geometry changes.
+    Ensures zero dead space on window resize, tab switch, maximize, or resolution changes.
+    """
+    def __init__(self, on_resized=None, parent=None):
+        super().__init__(parent)
+        self._on_resized = on_resized
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._on_resized:
+            self._on_resized()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  Main Posts Tab Widget
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1644,6 +1754,7 @@ class PostsTabWidget(QWidget):
         self.current_offset = 0
         self.all_creators_cache = []
         self.fetch_thread = None
+        self._active_fetch_workers = set()
 
         # Post search & caching state
         self.current_search_query = ""
@@ -1681,7 +1792,7 @@ class PostsTabWidget(QWidget):
         root_layout.setSpacing(0)
 
         # ── Page Stack: Page 0 = Browse / Cards / Table, Page 1 = Full In-App Post Detail ──
-        self.page_stack = QStackedWidget(self)
+        self.page_stack = _ResponsiveStackedWidget(self)
 
         # Page 0: Posts Browse View
         self.browse_page = QWidget(self.page_stack)
@@ -1912,10 +2023,11 @@ class PostsTabWidget(QWidget):
         self.view_stack = QStackedWidget()
 
         # View 0: Post Card Grid (Default)
-        self.grid_view = QListView()
+        self.grid_view = ResponsiveGridView(on_resized=self._adjust_grid_columns, parent=self)
         self.grid_view.setViewMode(QListView.ViewMode.IconMode)
         self.grid_view.setResizeMode(QListView.ResizeMode.Adjust)
         self.grid_view.setMovement(QListView.Movement.Static)
+        self.grid_view.setUniformItemSizes(True)
         self.grid_view.setSpacing(0)
         self.grid_view.setMouseTracking(True)
         self.grid_view.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
@@ -2020,17 +2132,34 @@ class PostsTabWidget(QWidget):
             return
         scale = getattr(self, "scale", 1.0)
         base_w = int(238 * scale)
-        cols = max(1, vp_w // base_w)
-        slot_w = max(int(180 * scale), (vp_w - 2) // cols)
+
+        sb = self.grid_view.verticalScrollBar()
+        sb_w = (sb.width() if 0 < sb.width() <= 40 else sb.sizeHint().width()) if (sb and not sb.isVisible()) else 0
+        safety = sb_w + int(8 * scale)
+        usable_w = vp_w - safety - int(4 * scale)
+        if usable_w <= 100:
+            usable_w = vp_w - int(4 * scale)
+
+        cols = max(1, usable_w // base_w)
+        slot_w = max(int(180 * scale), usable_w // cols)
+
+        # Ensure cols * slot_w never touches or exceeds the viewport's inclusive right boundary
+        # to prevent Qt's QListView from prematurely wrapping the final column to the next row.
+        while cols > 1 and (cols * slot_w > vp_w - safety - int(2 * scale)):
+            slot_w -= 1
+
         thumb_h = int(slot_w * 10 / 16)
         slot_h = thumb_h + int(130 * scale)
         self.grid_delegate.card_w = slot_w
         self.grid_delegate.card_h = slot_h
         self.grid_view.setGridSize(QSize(slot_w, slot_h))
+        self.grid_view.doItemsLayout()
+        self.grid_view.viewport().update()
 
     def showEvent(self, event):
         super().showEvent(event)
         self._adjust_grid_columns()
+        QTimer.singleShot(0, self._adjust_grid_columns)
         if not getattr(self, "_header_initialized", False):
             th = self.table_view.horizontalHeader()
             vw = self.table_view.viewport().width()
@@ -2044,6 +2173,7 @@ class PostsTabWidget(QWidget):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._adjust_grid_columns()
+        QTimer.singleShot(0, self._adjust_grid_columns)
         self._scroll_prune_timer.start()
 
     def _on_view_scrolled(self):
@@ -2111,16 +2241,14 @@ class PostsTabWidget(QWidget):
         return visible_ids
 
     def on_tab_deactivated(self):
-        """Called when user navigates away from the Posts tab: unloads memory caches immediately."""
+        """Called when user navigates away from the Posts tab."""
         self._scroll_prune_timer.stop()
-        if hasattr(self, 'thumb_manager') and self.thumb_manager:
-            self.thumb_manager.clear_memory_cache()
-        if hasattr(self, 'media_manager') and self.media_manager:
-            self.media_manager.clear_memory_cache()
 
     def on_tab_activated(self):
         """Called when user navigates back to Posts tab: re-renders visible viewport from disk cache."""
         self._adjust_grid_columns()
+        QTimer.singleShot(0, self._adjust_grid_columns)
+        QTimer.singleShot(60, self._adjust_grid_columns)
         if hasattr(self, "page_stack") and self.page_stack.currentIndex() == 0:
             if hasattr(self, "view_stack"):
                 if self.view_stack.currentIndex() == 0:
@@ -2220,7 +2348,9 @@ class PostsTabWidget(QWidget):
         self.current_search_query = ""
         self._initial_posts = []
         self.creator_input.clear()
+        self.post_search_input.blockSignals(True)
         self.post_search_input.clear()
+        self.post_search_input.blockSignals(False)
         self.model.set_posts([])
         self.hero_widget.set_creator(None, 0)
         self.hero_widget.setVisible(False)
@@ -2249,7 +2379,9 @@ class PostsTabWidget(QWidget):
         self.current_creator = creators[0]
         self.current_search_query = ""
         self._initial_posts = []
+        self.post_search_input.blockSignals(True)
         self.post_search_input.clear()
+        self.post_search_input.blockSignals(False)
 
         # Update hero widget
         self.hero_widget.set_creator(self.current_creator, total_count=len(creators))
@@ -2281,6 +2413,9 @@ class PostsTabWidget(QWidget):
 
         self._update_active_creators_ui()
         self.current_offset = 0
+        self._adjust_grid_columns()
+        QTimer.singleShot(0, self._adjust_grid_columns)
+        QTimer.singleShot(60, self._adjust_grid_columns)
         self._fetch_all_posts(offset=0, append=False)
 
     def _on_back_to_creators_clicked(self):
@@ -2457,12 +2592,18 @@ class PostsTabWidget(QWidget):
     #  API Fetching Logic (Multi-Creator & Single Creator)
     # ─────────────────────────────────────────────────────────────────────────
 
+    def _cancel_active_fetch(self):
+        """Safely stops and detaches any running background fetch thread without C++ destruction crashes."""
+        if getattr(self, "fetch_thread", None):
+            worker = self.fetch_thread
+            self.fetch_thread = None
+            worker.cancel()
+
     def _fetch_all_posts(self, offset: int = 0, append: bool = False):
         if not self.current_creators:
             return
 
-        if self.fetch_thread and self.fetch_thread.isRunning():
-            return
+        self._cancel_active_fetch()
 
         count = len(self.current_creators)
         if count > 1:
@@ -2476,17 +2617,23 @@ class PostsTabWidget(QWidget):
         self.next_page_btn.setEnabled(False)
         self.load_more_btn.setEnabled(False)
 
-        self.fetch_thread = FetchMultipleCreatorPostsThread(
+        worker = FetchMultipleCreatorPostsThread(
             self.current_creators,
             offset=offset,
             query="",
             fetch_all=False
         )
-        self.fetch_thread.status_signal.connect(self._on_fetch_status)
-        self.fetch_thread.finished_signal.connect(
+        if not hasattr(self, "_active_fetch_workers"):
+            self._active_fetch_workers = set()
+        self._active_fetch_workers.add(worker)
+        worker.finished.connect(lambda w=worker: self._active_fetch_workers.discard(w))
+        self.fetch_thread = worker
+
+        worker.status_signal.connect(self._on_fetch_status)
+        worker.finished_signal.connect(
             lambda ok, msg, posts: self._on_fetch_finished(ok, msg, posts, append, offset)
         )
-        self.fetch_thread.start()
+        worker.start()
 
     def _fetch_posts(self, service: str, creator_id: str, offset: int = 0, append: bool = False):
         """Compatibility wrapper for single creator fetch."""
@@ -2498,10 +2645,16 @@ class PostsTabWidget(QWidget):
     def _on_fetch_finished(self, success: bool, message: str, posts: list, append: bool, offset: int):
         self.load_btn.setEnabled(True)
 
+        # If user has initiated a search query, discard stale pagination callback
+        if getattr(self, "current_search_query", ""):
+            return
+
         if success:
             self.current_offset = offset
             self.model.set_posts(posts, append=append)
             self._adjust_grid_columns()
+            QTimer.singleShot(0, self._adjust_grid_columns)
+            QTimer.singleShot(60, self._adjust_grid_columns)
             if not append and offset == 0 and not self.current_search_query:
                 self._initial_posts = list(posts)
 
@@ -2557,8 +2710,8 @@ class PostsTabWidget(QWidget):
             self.search_debounce_timer.stop()
             if self.current_search_query:
                 self.current_search_query = ""
-                if self.fetch_thread and self.fetch_thread.isRunning():
-                    self.fetch_thread.cancel()
+                self._cancel_active_fetch()
+                self.load_btn.setEnabled(True)
 
                 # Instant restore of initial posts with zero latency
                 if self._initial_posts:
@@ -2576,9 +2729,8 @@ class PostsTabWidget(QWidget):
                     self._fetch_all_posts(offset=0, append=False)
             return
 
-        # User is actively typing: cancel any ongoing background search to eliminate lag
-        if self.fetch_thread and self.fetch_thread.isRunning():
-            self.fetch_thread.cancel()
+        # User is actively typing: cancel any ongoing background search to eliminate lag & prevent collisions
+        self._cancel_active_fetch()
         self.search_debounce_timer.start()
 
     def _execute_post_search(self):
@@ -2588,7 +2740,7 @@ class PostsTabWidget(QWidget):
         if not self.current_creators:
             return
 
-        if query == self.current_search_query:
+        if query == self.current_search_query and query != "":
             return
 
         if not query:
@@ -2596,9 +2748,7 @@ class PostsTabWidget(QWidget):
             return
 
         self.current_search_query = query
-
-        if self.fetch_thread and self.fetch_thread.isRunning():
-            self.fetch_thread.cancel()
+        self._cancel_active_fetch()
 
         self.status_label.setText(f"Searching full catalog for '{query}'...")
         self.page_info_lbl.setText(f"Query: \"{query}\"")
@@ -2607,25 +2757,30 @@ class PostsTabWidget(QWidget):
         self.next_page_btn.setEnabled(False)
         self.load_more_btn.setEnabled(False)
 
-        # Launch background search thread with fetch_all=True
-        self.fetch_thread = FetchMultipleCreatorPostsThread(
+        worker = FetchMultipleCreatorPostsThread(
             self.current_creators,
             offset=0,
             query=query,
             fetch_all=True
         )
-        self.fetch_thread.status_signal.connect(self._on_fetch_status)
-        self.fetch_thread.finished_signal.connect(
-            lambda ok, msg, posts: self._on_search_finished(ok, msg, posts, query)
+        if not hasattr(self, "_active_fetch_workers"):
+            self._active_fetch_workers = set()
+        self._active_fetch_workers.add(worker)
+        worker.finished.connect(lambda w=worker: self._active_fetch_workers.discard(w))
+        self.fetch_thread = worker
+
+        worker.status_signal.connect(self._on_fetch_status)
+        worker.finished_signal.connect(
+            lambda ok, msg, posts, q=query: self._on_search_finished(ok, msg, posts, q)
         )
-        self.fetch_thread.start()
+        worker.start()
 
     def _on_search_finished(self, success: bool, message: str, posts: list, query: str):
-        self.load_btn.setEnabled(True)
-
         # Discard stale callback if user already typed a new query
         if self.current_search_query != query:
             return
+
+        self.load_btn.setEnabled(True)
 
         if success:
             self.model.set_posts(posts, append=False)
@@ -2649,7 +2804,8 @@ class PostsTabWidget(QWidget):
                 )
         else:
             self.status_label.setText(message)
-            QMessageBox.warning(self, "Search Failed", message)
+            if self.current_search_query == query:
+                QMessageBox.warning(self, "Search Failed", message)
 
         self._update_selection_counter()
 
@@ -2838,6 +2994,7 @@ class PostsTabWidget(QWidget):
         if hasattr(self, "page_stack"):
             self.page_stack.setCurrentIndex(0)
             self._adjust_grid_columns()
+            QTimer.singleShot(0, self._adjust_grid_columns)
             if hasattr(self, "view_stack"):
                 if self.view_stack.currentIndex() == 0:
                     self.grid_view.viewport().update()

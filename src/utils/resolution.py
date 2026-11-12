@@ -5,7 +5,7 @@ from PySide6.QtWidgets import (
     QLineEdit, QPushButton, QStackedWidget, QButtonGroup, QRadioButton, QCheckBox,
     QListWidget, QTextEdit, QApplication, QSizePolicy, QToolButton
 )
-from PySide6.QtCore import Qt, QSize, QUrl
+from PySide6.QtCore import Qt, QSize, QUrl, QTimer
 from PySide6.QtGui import QIntValidator, QFont, QIcon, QPixmap, QDesktopServices
 
 from ..config.constants import *
@@ -868,13 +868,10 @@ def setup_ui(main_app):
             index = target
 
         old_index = main_app.content_stack.currentIndex()
-        if old_index != index:
-            if old_index == 2 and hasattr(main_app, 'creators_tab'):
-                main_app.creators_tab.on_tab_deactivated()
-            elif old_index == 3 and hasattr(main_app, 'posts_tab'):
-                main_app.posts_tab.on_tab_deactivated()
+        if old_index == index:
+            return
 
-        main_app.content_stack.setCurrentIndex(index)
+        # 1. Update nav button styles immediately so the click registers instantly
         nav_buttons = [
             (main_app.nav_dl, 0),
             (main_app.nav_queue, 1),
@@ -890,24 +887,37 @@ def setup_ui(main_app):
             btn.setObjectName("NavButtonSelected" if index == idx else "NavButton")
             btn.setStyle(btn.style())
 
-        if index == 1 and hasattr(main_app, 'queue_tab'):
-            main_app.queue_tab.on_tab_activated()
-        elif index == 2 and hasattr(main_app, 'creators_tab'):
-            main_app.creators_tab.on_tab_activated()
-        elif index == 3 and hasattr(main_app, 'posts_tab'):
-            main_app.posts_tab.on_tab_activated()
-        elif index == 4 and hasattr(main_app, 'sync_tab'):
-            main_app.sync_tab.on_tab_activated()
-        elif index == 5 and hasattr(main_app, 'visual_sort_tab'):
-            main_app.visual_sort_tab.on_tab_activated()
-        elif index == 6 and hasattr(main_app, 'favorites_tab'):
-            main_app.favorites_tab.on_tab_activated()
-        elif index == 7 and hasattr(main_app, 'about_tab'):
-            if hasattr(main_app.about_tab, 'on_tab_activated'):
-                main_app.about_tab.on_tab_activated()
-        elif index == 8 and hasattr(main_app, 'support_tab'):
-            if hasattr(main_app.support_tab, 'on_tab_activated'):
-                main_app.support_tab.on_tab_activated()
+        # 2. Deactivate previous tab
+        if old_index == 2 and hasattr(main_app, 'creators_tab'):
+            main_app.creators_tab.on_tab_deactivated()
+        elif old_index == 3 and hasattr(main_app, 'posts_tab'):
+            main_app.posts_tab.on_tab_deactivated()
+
+        # 3. Switch visible page stack immediately (0ms visual transition)
+        main_app.content_stack.setCurrentIndex(index)
+
+        # 4. Defer background activation / refresh work so Qt paints the new tab instantly
+        def _activate_tab(target_idx):
+            if target_idx == 1 and hasattr(main_app, 'queue_tab'):
+                main_app.queue_tab.on_tab_activated()
+            elif target_idx == 2 and hasattr(main_app, 'creators_tab'):
+                main_app.creators_tab.on_tab_activated()
+            elif target_idx == 3 and hasattr(main_app, 'posts_tab'):
+                main_app.posts_tab.on_tab_activated()
+            elif target_idx == 4 and hasattr(main_app, 'sync_tab'):
+                main_app.sync_tab.on_tab_activated()
+            elif target_idx == 5 and hasattr(main_app, 'visual_sort_tab'):
+                main_app.visual_sort_tab.on_tab_activated()
+            elif target_idx == 6 and hasattr(main_app, 'favorites_tab'):
+                main_app.favorites_tab.on_tab_activated()
+            elif target_idx == 7 and hasattr(main_app, 'about_tab'):
+                if hasattr(main_app.about_tab, 'on_tab_activated'):
+                    main_app.about_tab.on_tab_activated()
+            elif target_idx == 8 and hasattr(main_app, 'support_tab'):
+                if hasattr(main_app.support_tab, 'on_tab_activated'):
+                    main_app.support_tab.on_tab_activated()
+
+        QTimer.singleShot(0, lambda idx=index: _activate_tab(idx))
 
     main_app.switch_tab = switch_tab
     main_app.nav_dl.clicked.connect(lambda: switch_tab(0))
