@@ -77,8 +77,8 @@ if sys.platform.startswith('win'):
                         ctypes.windll.kernel32.LoadLibraryExW(dll_full, 0, LOAD_WITH_ALTERED_SEARCH_PATH)
                     except Exception:
                         pass
-            # Preload SVG plugins
-            for sub, plg in [('imageformats', 'qsvg.dll'), ('iconengines', 'qsvgicon.dll')]:
+            # Preload SVG and ICO plugins
+            for sub, plg in [('imageformats', 'qsvg.dll'), ('imageformats', 'qico.dll'), ('iconengines', 'qsvgicon.dll')]:
                 plg_path = os.path.join(ps_dir, 'plugins', sub, plg)
                 if os.path.exists(plg_path):
                     try:
@@ -89,7 +89,7 @@ if sys.platform.startswith('win'):
 
 # --- PySide6 Imports ---
 from PySide6.QtWidgets import QApplication, QDialog
-from PySide6.QtCore import QCoreApplication
+from PySide6.QtCore import QCoreApplication, QTimer
 from PySide6.QtGui import QIcon, QImageReader
 
 try:
@@ -159,6 +159,100 @@ def preload_ai_model():
     except Exception as e:
         print(f"⚠️ Note: Visual Sort engine could not be pre-loaded: {e}")
 
+def _load_app_icon():
+    """Loads the application QIcon with PNG fallback if ICO decoding fails."""
+    for rel_name in ("Pawchive.ico", "Pawchive.png"):
+        for base_dir in (APP_RESOURCE_DIR, APP_RUNTIME_DIR):
+            candidate = os.path.join(base_dir, "assets", rel_name)
+            if os.path.exists(candidate):
+                icon = QIcon(candidate)
+                if not icon.isNull():
+                    return icon, candidate
+    return None, None
+
+
+def _apply_windows_taskbar_icon(window, ico_path=None):
+    """Explicitly binds Win32 big/small HICON on both the HWND and window class."""
+    if not sys.platform.startswith('win') or window is None:
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+
+        IMAGE_ICON = 1
+        LR_LOADFROMFILE = 0x0010
+        LR_SHARED = 0x8000
+        WM_SETICON = 0x0080
+        ICON_SMALL = 0
+        ICON_BIG = 1
+        GCLP_HICON = -14
+        GCLP_HICONSM = -34
+        SM_CXICON = 11
+        SM_CYICON = 12
+        SM_CXSMICON = 49
+        SM_CYSMICON = 50
+
+        kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+        kernel32.GetModuleHandleW.restype = wintypes.HINSTANCE
+        user32.LoadImageW.argtypes = [
+            wintypes.HINSTANCE, ctypes.c_void_p, wintypes.UINT,
+            ctypes.c_int, ctypes.c_int, wintypes.UINT,
+        ]
+        user32.LoadImageW.restype = wintypes.HICON
+        user32.SendMessageW.argtypes = [
+            wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM,
+        ]
+        user32.SendMessageW.restype = ctypes.c_ssize_t
+
+        set_class_long = getattr(user32, 'SetClassLongPtrW', None) or user32.SetClassLongW
+        set_class_long.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]
+        set_class_long.restype = ctypes.c_ssize_t
+
+        cx_big = user32.GetSystemMetrics(SM_CXICON) or 32
+        cy_big = user32.GetSystemMetrics(SM_CYICON) or 32
+        cx_sm = user32.GetSystemMetrics(SM_CXSMICON) or 16
+        cy_sm = user32.GetSystemMetrics(SM_CYSMICON) or 16
+
+        h_big = None
+        h_sm = None
+
+        # Prefer the EXE's own embedded RT_GROUP_ICON (resource id=1) when frozen
+        if getattr(sys, 'frozen', False):
+            h_mod = kernel32.GetModuleHandleW(None)
+            if h_mod:
+                h_big = user32.LoadImageW(h_mod, ctypes.c_void_p(1), IMAGE_ICON, cx_big, cy_big, LR_SHARED)
+                h_sm = user32.LoadImageW(h_mod, ctypes.c_void_p(1), IMAGE_ICON, cx_sm, cy_sm, LR_SHARED)
+
+        # Fallback to loading the .ico file directly from disk
+        ico_candidate = ico_path if (ico_path and ico_path.lower().endswith('.ico')) else os.path.join(APP_RESOURCE_DIR, "assets", "Pawchive.ico")
+        if (not h_big or not h_sm) and ico_candidate and os.path.exists(ico_candidate):
+            ico_ptr = ctypes.cast(ctypes.c_wchar_p(os.path.abspath(ico_candidate)), ctypes.c_void_p)
+            if not h_big:
+                h_big = user32.LoadImageW(None, ico_ptr, IMAGE_ICON, cx_big, cy_big, LR_LOADFROMFILE)
+            if not h_sm:
+                h_sm = user32.LoadImageW(None, ico_ptr, IMAGE_ICON, cx_sm, cy_sm, LR_LOADFROMFILE)
+            # Keep non-shared file HICONs alive for the lifetime of the window
+            window._win_hicons = (h_big, h_sm)
+
+        hwnd = int(window.winId())
+        if not hwnd:
+            return
+
+        if h_big:
+            h_big_val = ctypes.c_ssize_t(int(h_big)).value
+            set_class_long(hwnd, GCLP_HICON, h_big_val)
+            user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, h_big_val)
+        if h_sm:
+            h_sm_val = ctypes.c_ssize_t(int(h_sm)).value
+            set_class_long(hwnd, GCLP_HICONSM, h_sm_val)
+            user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, h_sm_val)
+    except Exception:
+        pass
+
+
 def main():
     """Main entry point for the Pawchive Downloader application."""
     
@@ -172,15 +266,18 @@ def main():
         preload_ai_model()
 
         # --- Windows Taskbar AppUserModelID ---
-        # MUST be called BEFORE QApplication() so Windows assigns the correct
-        # taskbar group instead of grouping under the python.exe icon.
-        try:
-            import ctypes
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-                "PawchiveDownloader.App.1"
-            )
-        except Exception:
-            pass  # Non-Windows platforms silently skip this.
+        # Only override AppUserModelID when running unfrozen (via python.exe) so dev
+        # runs don't group under python.exe. Frozen .exe builds should keep their
+        # native executable identity so Windows Explorer immediately resolves the
+        # embedded PE icon on first launch without requiring an installer shortcut.
+        if sys.platform.startswith('win') and not getattr(sys, 'frozen', False):
+            try:
+                import ctypes
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                    "PawchiveDownloader.App.1"
+                )
+            except Exception:
+                pass
 
         # Register Qt plugin paths for image formats (SVG, ICO, WebP) and platforms
         plugin_dirs = [
@@ -208,12 +305,9 @@ def main():
         print(f"Qt initialized. Supported image formats ({len(supported_formats)}): {', '.join(supported_formats)}")
 
         # --- Application-level icon (taskbar + all windows) ---
-        _icon_path = os.path.join(APP_RESOURCE_DIR, "assets", "Pawchive.ico")
-        if os.path.exists(_icon_path):
-            _app_icon = QIcon(_icon_path)
+        _app_icon, _icon_path = _load_app_icon()
+        if _app_icon and not _app_icon.isNull():
             qt_app.setWindowIcon(_app_icon)
-        else:
-            _app_icon = None
 
         # Create the main application window
         downloader_app_instance = DownloaderApp()
@@ -248,6 +342,12 @@ def main():
         downloader_app_instance.show()
         if hasattr(downloader_app_instance, '_center_on_screen'):
             downloader_app_instance._center_on_screen()
+
+        # Bind Win32 HICON directly and flush initial window events before exec()
+        # so Explorer never caches a blank icon during startup.
+        _apply_windows_taskbar_icon(downloader_app_instance, _icon_path)
+        qt_app.processEvents()
+        QTimer.singleShot(0, lambda: _apply_windows_taskbar_icon(downloader_app_instance, _icon_path))
 
         # First-run guide is available in the dedicated About tab
 

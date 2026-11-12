@@ -1,6 +1,3 @@
-import json
-import os
-import sys
 import requests
 from PySide6.QtCore import Qt, QSize, QUrl, QThread, Signal
 from PySide6.QtGui import QIcon, QPixmap, QDesktopServices
@@ -12,9 +9,9 @@ from PySide6.QtWidgets import (
 from .assets import get_asset_path
 
 
-# Optional public read-only JSON endpoint (e.g. GitHub Raw / Gist / Hugging Face).
-# When set, Top Supporters are fetched in memory without writing any file to disk.
-SUPPORTERS_JSON_URL = ""
+# Public read-only Hugging Face JSON endpoint.
+# Fetched strictly in memory on tab activation without downloading or saving any file to disk.
+SUPPORTERS_JSON_URL = "https://huggingface.co/datasets/Yuvi9587/Creators-json/resolve/main/supporters.json"
 
 _PLATFORM_META = {
     "kofi": ("Ko-fi", "assets/Ko-fi.png", "#F43F5E"),
@@ -44,24 +41,6 @@ def _load_icon_pixmap(rel_path: str, dim: int) -> QPixmap:
         Qt.AspectRatioMode.KeepAspectRatio,
         Qt.TransformationMode.SmoothTransformation,
     )
-
-
-def _get_local_supporters_json_path() -> str:
-    """Finds sanitized supporter/supporters.json if present locally; never reads raw PII CSVs."""
-    candidates = []
-    if getattr(sys, "frozen", False):
-        if hasattr(sys, "_MEIPASS"):
-            candidates.append(sys._MEIPASS)
-        exe_dir = os.path.dirname(sys.executable)
-        candidates.append(exe_dir)
-        candidates.append(os.path.join(exe_dir, "_internal"))
-    else:
-        candidates.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
-    for base in candidates:
-        p = os.path.normpath(os.path.join(base, "supporter", "supporters.json"))
-        if os.path.exists(p):
-            return p
-    return ""
 
 
 def _sanitize_supporters_payload(data) -> tuple[list, str]:
@@ -120,14 +99,36 @@ class _SupportersFetchWorker(QThread):
         super().__init__(parent)
         self.url = url
 
+    @staticmethod
+    def _candidate_urls(raw_url: str) -> list:
+        u = (raw_url or "").strip()
+        urls = []
+        if "/blob/" in u:
+            urls.append(u.replace("/blob/", "/resolve/", 1))
+            urls.append(u.replace("/blob/", "/raw/", 1))
+        else:
+            urls.append(u)
+            if "/resolve/" in u:
+                urls.append(u.replace("/resolve/", "/raw/", 1))
+        return urls
+
     def run(self):
-        try:
-            resp = requests.get(self.url, timeout=10)
-            resp.raise_for_status()
-            supporters, updated_at = _sanitize_supporters_payload(resp.json())
-            self.loaded.emit(supporters, updated_at)
-        except Exception as e:
-            self.failed.emit(str(e))
+        last_err = "Unknown error"
+        headers = {
+            "Accept": "application/json",
+            "Cache-Control": "no-cache",
+            "User-Agent": "Pawchive-Downloader",
+        }
+        for target_url in self._candidate_urls(self.url):
+            try:
+                resp = requests.get(target_url, headers=headers, timeout=12)
+                resp.raise_for_status()
+                supporters, updated_at = _sanitize_supporters_payload(resp.json())
+                self.loaded.emit(supporters, updated_at)
+                return
+            except Exception as e:
+                last_err = str(e)
+        self.failed.emit(last_err)
 
 
 class SupportLinkRow(QFrame):
@@ -373,8 +374,8 @@ class SupportTabWidget(QWidget):
         self.scale = scale
         self._supporters_worker = None
         self._remote_loaded = False
+        self._has_rendered_data = False
         self._init_ui()
-        self._load_initial_supporters()
 
     def on_tab_activated(self):
         """Called when this tab is selected in content_stack."""
@@ -615,6 +616,7 @@ class SupportTabWidget(QWidget):
 
         sup_head_row = QHBoxLayout()
         sup_head_row.setContentsMargins(0, 0, 0, 0)
+        sup_head_row.setSpacing(int(8 * scale))
         sup_head_row.addWidget(self._make_panel_heading("Top Supporters", "assets/Svg/star.svg"))
         sup_head_row.addStretch(1)
 
@@ -622,6 +624,30 @@ class SupportTabWidget(QWidget):
         self.supporters_updated_lbl.setStyleSheet(f"font-size: {int(8 * scale)}pt; color: #7C828E;")
         self.supporters_updated_lbl.setVisible(False)
         sup_head_row.addWidget(self.supporters_updated_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        self.supporters_refresh_btn = QPushButton("↻ Refresh")
+        self.supporters_refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.supporters_refresh_btn.setFixedHeight(int(22 * scale))
+        self.supporters_refresh_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: #1D2029;
+                border: 1px solid #2E3340;
+                border-radius: 5px;
+                color: #9CA3AF;
+                font-size: {int(8 * scale)}pt;
+                font-weight: 600;
+                padding: 0 {int(8 * scale)}px;
+            }}
+            QPushButton:hover {{
+                border-color: #E5A198;
+                color: #FFFFFF;
+            }}
+            QPushButton:disabled {{
+                color: #6B7280;
+            }}
+        """)
+        self.supporters_refresh_btn.clicked.connect(lambda: self._fetch_remote_supporters(force=True))
+        sup_head_row.addWidget(self.supporters_refresh_btn, 0, Qt.AlignmentFlag.AlignVCenter)
         right_col.addLayout(sup_head_row)
 
         supporters_panel = QFrame()
@@ -650,20 +676,19 @@ class SupportTabWidget(QWidget):
         self.supporters_list_layout.setSpacing(int(2 * scale))
         sp_layout.addLayout(self.supporters_list_layout)
 
-        self.supporters_empty_lbl = QLabel("No public supporters listed yet — be the first!")
+        self.supporters_empty_lbl = QLabel("Loading top supporters...")
         self.supporters_empty_lbl.setWordWrap(True)
         self.supporters_empty_lbl.setStyleSheet(
             f"font-size: {int(8.5 * scale)}pt; color: #8C929E; padding: {int(12 * scale)}px 0;"
         )
-        self.supporters_empty_lbl.setVisible(False)
+        self.supporters_empty_lbl.setVisible(True)
         sp_layout.addWidget(self.supporters_empty_lbl)
 
         sp_layout.addStretch(1)
         sp_layout.addWidget(self._make_divider())
 
         cta_note = QLabel(
-            "Want to join the wall? Support via Ko-fi or Buy Me a Coffee with a public display name — "
-            "emails and transaction IDs are always kept private."
+            "Want to join the wall? Support via Ko-fi or Buy Me a Coffee with a public display name "
         )
         cta_note.setWordWrap(True)
         cta_note.setStyleSheet(
@@ -714,33 +739,38 @@ class SupportTabWidget(QWidget):
         scroll.setWidget(page_container)
         root_layout.addWidget(scroll, 1)
 
-    def _load_initial_supporters(self):
-        local_path = _get_local_supporters_json_path()
-        if not local_path:
-            self._render_supporters([], "")
-            return
-        try:
-            with open(local_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            supporters, updated_at = _sanitize_supporters_payload(data)
-            self._render_supporters(supporters, updated_at)
-        except Exception:
-            self._render_supporters([], "")
-
-    def _fetch_remote_supporters(self):
+    def _fetch_remote_supporters(self, force: bool = False):
         if not SUPPORTERS_JSON_URL:
             return
         if self._supporters_worker and self._supporters_worker.isRunning():
             return
+        if hasattr(self, "supporters_refresh_btn"):
+            self.supporters_refresh_btn.setEnabled(False)
+            self.supporters_refresh_btn.setText("Loading...")
+        if not self._has_rendered_data:
+            self.supporters_empty_lbl.setText("Loading top supporters...")
+            self.supporters_empty_lbl.setVisible(True)
+
         worker = _SupportersFetchWorker(SUPPORTERS_JSON_URL, parent=self)
         worker.loaded.connect(self._on_remote_supporters_loaded)
+        worker.failed.connect(self._on_remote_supporters_failed)
         self._supporters_worker = worker
         worker.start()
 
     def _on_remote_supporters_loaded(self, supporters: list, updated_at: str):
         self._remote_loaded = True
-        if supporters:
-            self._render_supporters(supporters, updated_at)
+        if hasattr(self, "supporters_refresh_btn"):
+            self.supporters_refresh_btn.setEnabled(True)
+            self.supporters_refresh_btn.setText("↻ Refresh")
+        self._render_supporters(supporters, updated_at)
+
+    def _on_remote_supporters_failed(self, err: str):
+        if hasattr(self, "supporters_refresh_btn"):
+            self.supporters_refresh_btn.setEnabled(True)
+            self.supporters_refresh_btn.setText("↻ Refresh")
+        if not self._has_rendered_data:
+            self.supporters_empty_lbl.setText("Could not load supporters right now. Click Refresh to try again.")
+            self.supporters_empty_lbl.setVisible(True)
 
     def _render_supporters(self, supporters: list, updated_at: str = ""):
         while self.supporters_list_layout.count():
@@ -749,10 +779,14 @@ class SupportTabWidget(QWidget):
                 item.widget().deleteLater()
 
         if not supporters:
+            self._has_rendered_data = False
             self.supporters_summary_lbl.setText("Ko-fi & Buy Me a Coffee Leaderboard")
+            self.supporters_empty_lbl.setText("No public supporters listed yet — be the first!")
             self.supporters_empty_lbl.setVisible(True)
             self.supporters_updated_lbl.setVisible(False)
             return
+
+        self._has_rendered_data = True
 
         count = len(supporters)
         self.supporters_summary_lbl.setText(
