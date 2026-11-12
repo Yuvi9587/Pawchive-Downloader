@@ -4,6 +4,7 @@ import csv
 import io
 import html
 import json
+import math
 import hashlib
 import requests
 from datetime import datetime
@@ -1065,6 +1066,7 @@ class PostDetailView(QWidget):
         self.scroll_area = _NoHorizontalScrollArea(self)
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll_area.on_resized_callback = lambda: QTimer.singleShot(0, self._update_desc_height)
         self.scroll_area.setStyleSheet(
             "QScrollArea { background-color: #12141A; border: none; }"
             "QScrollBar:vertical { background: #161820; width: 10px; margin: 0; }"
@@ -1250,7 +1252,48 @@ class PostDetailView(QWidget):
         self.desc_browser = QTextBrowser(self.desc_card)
         self.desc_browser.setOpenExternalLinks(True)
         self.desc_browser.setStyleSheet(
-            "QTextBrowser { background: transparent; border: none; color: #DFE1E5; font-size: 9.5pt; line-height: 1.5; font-family: Segoe UI, sans-serif; padding: 0px; }"
+            "QTextBrowser { background: transparent; border: none; color: #DFE1E5; font-size: 9.5pt; "
+            "font-family: 'Segoe UI', 'Yu Gothic UI', 'Meiryo', 'Microsoft YaHei', sans-serif; padding: 0px; }"
+        )
+        self.desc_browser.document().setDocumentMargin(0)
+        self.desc_browser.document().setDefaultStyleSheet(
+            """
+            body, div, p, ul, ol, li, blockquote, h1, h2, h3, h4, h5, h6 {
+                color: #DFE1E5;
+                font-family: "Segoe UI", "Yu Gothic UI", "Meiryo", "Microsoft YaHei", sans-serif;
+            }
+            p, div, li, blockquote {
+                line-height: 130%;
+            }
+            p {
+                margin-top: 0px;
+                margin-bottom: 6px;
+            }
+            li p {
+                margin-top: 0px;
+                margin-bottom: 2px;
+            }
+            ul, ol {
+                margin-top: 2px;
+                margin-bottom: 6px;
+            }
+            li {
+                margin-top: 0px;
+                margin-bottom: 2px;
+            }
+            blockquote {
+                margin-top: 4px;
+                margin-bottom: 6px;
+                margin-left: 12px;
+            }
+            h1, h2, h3, h4, h5, h6 {
+                margin-top: 8px;
+                margin-bottom: 4px;
+            }
+            a {
+                color: #E5A198;
+            }
+            """
         )
         self.desc_browser.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.desc_browser.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -1836,9 +1879,113 @@ class PostDetailView(QWidget):
             return True
         # Strip HTML tags
         text = re.sub(r"<[^>]*>", "", clean)
-        # Strip common HTML whitespace entities (&nbsp;, &#160;, etc.)
-        text = re.sub(r"&(?:nbsp|#160|#xA0|amp|quot|lt|gt|#39);", " ", text, flags=re.IGNORECASE)
-        return bool(text.strip())
+        # Strip common HTML whitespace entities (&nbsp;, &#160;, etc.) and zero-width chars
+        text = html.unescape(text)
+        text = re.sub(r"[\s\u00a0\u3000\u200b-\u200d\ufeff]+", "", text)
+        return bool(text)
+
+    _DESC_MEDIA_OR_CONTAINER_RE = re.compile(
+        r"<(?:img|video|audio|iframe|embed|object|svg|hr|table|ul|ol|li|blockquote|pre|input|a)\b",
+        re.IGNORECASE,
+    )
+    _DESC_PRE_BLOCK_RE = re.compile(r"<pre\b[^>]*>.*?</pre>", re.IGNORECASE | re.DOTALL)
+    _DESC_LEAF_BLOCK_RE = re.compile(
+        r"<(p|div|h[1-6])(?:\s[^>]*)?>([^<]*(?:<(?!/?(?:p|div|h[1-6]|ul|ol|li|blockquote|table|pre)\b)[^<]*)*)</\1>",
+        re.IGNORECASE | re.DOTALL,
+    )
+    _DESC_BR_RE = r"<br\s*/?>"
+    _DESC_MULTI_BR_RE = re.compile(rf"(?:{_DESC_BR_RE}\s*){{3,}}", re.IGNORECASE)
+    _DESC_INNER_LEADING_BR_RE = re.compile(rf"^(?:\s|{_DESC_BR_RE})+", re.IGNORECASE)
+    _DESC_INNER_TRAILING_BR_RE = re.compile(rf"(?:\s|{_DESC_BR_RE})+$", re.IGNORECASE)
+    _DESC_SPACER_HTML = (
+        "<div style='margin: 0px; padding: 0px; font-size: 6pt; line-height: 100%;'>&nbsp;</div>"
+    )
+
+    @classmethod
+    def _classify_empty_desc_block(cls, inner: str):
+        """Returns None if block has visible content, 'SPACER' for <br>/nbsp/CJK-space spacer blocks, else 'EMPTY'."""
+        if cls._DESC_MEDIA_OR_CONTAINER_RE.search(inner):
+            return None
+        has_br = bool(re.search(r"<br\b", inner, re.IGNORECASE))
+        text = html.unescape(re.sub(r"<[^>]*>", "", inner))
+        visible = re.sub(r"[\s\u00a0\u3000\u200b-\u200d\ufeff]+", "", text)
+        if visible:
+            return None
+        if has_br or "\u00a0" in text or "\u3000" in text:
+            return "SPACER"
+        return "EMPTY"
+
+    @classmethod
+    def _sanitize_description_html(cls, raw_html: str) -> str:
+        """Normalizes empty <p>/<br> spacer runs that QTextDocument expands into excessive vertical gaps."""
+        if not raw_html:
+            return ""
+        s = str(raw_html).strip()
+
+        # Preserve <pre> blocks verbatim
+        pre_blocks = []
+
+        def _stash_pre(m):
+            idx = len(pre_blocks)
+            pre_blocks.append(m.group(0))
+            return f"\x00PRE_{idx}\x00"
+
+        s = cls._DESC_PRE_BLOCK_RE.sub(_stash_pre, s)
+
+        # Two passes handle wrapper divs that only contained empty child <p> blocks
+        for _ in range(2):
+            def _repl_block(m):
+                tag, inner = m.group(1), m.group(2)
+                kind = cls._classify_empty_desc_block(inner)
+                if kind == "SPACER":
+                    return "\x00BLK_SPACER\x00"
+                if kind == "EMPTY":
+                    return "\x00BLK_EMPTY\x00"
+                # Qt turns trailing <br> inside <p> into a full extra empty line (\u2028)
+                cleaned = cls._DESC_INNER_LEADING_BR_RE.sub("", inner)
+                cleaned = cls._DESC_INNER_TRAILING_BR_RE.sub("", cleaned)
+                cleaned = cls._DESC_MULTI_BR_RE.sub("<br><br>", cleaned)
+                open_tag_end = m.group(0).find(">") + 1
+                open_tag = m.group(0)[:open_tag_end]
+                return f"{open_tag}{cleaned}</{tag}>"
+
+            s = cls._DESC_LEAF_BLOCK_RE.sub(_repl_block, s)
+
+        # Remove leading/trailing empty spacer blocks and <br> at document or wrapper-container boundaries
+        edge_token = rf"(?:\s|{cls._DESC_BR_RE}|\x00BLK_EMPTY\x00|\x00BLK_SPACER\x00)+"
+        s = re.sub(rf"^{edge_token}", "", s, flags=re.IGNORECASE)
+        s = re.sub(rf"{edge_token}$", "", s, flags=re.IGNORECASE)
+        s = re.sub(rf"(<(?:div|body|blockquote)(?:\s[^>]*)?>){edge_token}", r"\1", s, flags=re.IGNORECASE)
+        s = re.sub(rf"{edge_token}(</(?:div|body|blockquote)>)", r"\1", s, flags=re.IGNORECASE)
+
+        # Collapse consecutive empty blocks in the middle to at most one compact spacer
+        mid_run_re = re.compile(
+            rf"(?:\x00BLK_(?:EMPTY|SPACER)\x00(?:\s|{cls._DESC_BR_RE})*)+",
+            re.IGNORECASE,
+        )
+        s = mid_run_re.sub(
+            lambda m: cls._DESC_SPACER_HTML if "\x00BLK_SPACER\x00" in m.group(0) else "",
+            s,
+        )
+
+        # Collapse stray <br> runs sitting directly between block elements
+        between_blocks_br_re = re.compile(
+            rf"(</(?:p|div|h[1-6]|ul|ol|blockquote)>)\s*((?:{cls._DESC_BR_RE}\s*)+)(?=<(?:p|div|h[1-6]|ul|ol|blockquote)\b)",
+            re.IGNORECASE,
+        )
+        s = between_blocks_br_re.sub(
+            lambda m: m.group(1) + (
+                cls._DESC_SPACER_HTML
+                if len(re.findall(cls._DESC_BR_RE, m.group(2), flags=re.IGNORECASE)) >= 2
+                else ""
+            ),
+            s,
+        )
+
+        for idx, block in enumerate(pre_blocks):
+            s = s.replace(f"\x00PRE_{idx}\x00", block)
+
+        return s.strip()
 
     def _apply_post_data_to_view(self, post_data: dict, is_revision: bool = False):
         """Applies title, dates, tags, description, and media items for current post or revision."""
@@ -1895,14 +2042,20 @@ class PostDetailView(QWidget):
         # 2. Description
         content = (post_data.get("content") or "").strip()
         if self._has_visible_description(content):
-            self.desc_card.setVisible(True)
-            self.desc_browser.setHtml(
-                f"<div style='color: #DFE1E5; font-size: 9.5pt; line-height: 1.5; font-family: Segoe UI, sans-serif;'>"
-                f"{content}"
-                f"</div>"
-            )
-            self._update_desc_height()
-            QTimer.singleShot(20, self._update_desc_height)
+            clean_content = self._sanitize_description_html(content)
+            if clean_content:
+                self.desc_card.setVisible(True)
+                self.desc_browser.setHtml(
+                    f"<div style='color: #DFE1E5; font-size: 9.5pt; "
+                    f"font-family: \"Segoe UI\", \"Yu Gothic UI\", \"Meiryo\", \"Microsoft YaHei\", sans-serif;'>"
+                    f"{clean_content}"
+                    f"</div>"
+                )
+                self._update_desc_height()
+                QTimer.singleShot(20, self._update_desc_height)
+            else:
+                self.desc_card.setVisible(False)
+                self.desc_browser.clear()
         else:
             self.desc_card.setVisible(False)
             self.desc_browser.clear()
@@ -2344,6 +2497,8 @@ class PostDetailView(QWidget):
             pix = getattr(self.image_view, "_pixmap", None)
             if pix and not pix.isNull():
                 self._update_expanded_height(pix)
+        self._update_desc_height()
+        QTimer.singleShot(0, self._update_desc_height)
 
     def _populate_sidebar(self):
         # Clear existing cards
@@ -3393,9 +3548,15 @@ class PostDetailView(QWidget):
         self.nav_status_lbl.setText("Sent post to Downloader tab!")
         QTimer.singleShot(2000, lambda: self.nav_status_lbl.setText(""))
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._update_desc_height()
+        QTimer.singleShot(0, self._update_desc_height)
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._update_desc_height()
+        QTimer.singleShot(0, self._update_desc_height)
         if hasattr(self, "scroll_area"):
             self.scroll_area.horizontalScrollBar().setValue(0)
         if getattr(self, "is_expanded_view", False) and hasattr(self, "image_view"):
@@ -3408,13 +3569,21 @@ class PostDetailView(QWidget):
             return
         if not self.desc_card.isVisible():
             return
-        w = self.desc_card.width()
+        w = 0
+        if hasattr(self, "scroll_area"):
+            vp_w = self.scroll_area.viewport().width()
+            if vp_w > int(120 * self.scale):
+                cm = self.content_layout.contentsMargins()
+                w = vp_w - cm.left() - cm.right()
+        if w <= int(120 * self.scale):
+            w = self.desc_card.width()
         margins = self.desc_card.layout().contentsMargins()
         avail_w = max(100, w - margins.left() - margins.right() - int(10 * self.scale))
         self.desc_browser.document().setTextWidth(avail_w)
-        doc_h = int(self.desc_browser.document().size().height())
-        self.desc_browser.setFixedHeight(max(int(24 * self.scale), doc_h + int(6 * self.scale)))
-        self.desc_card.adjustSize()
+        doc_h = math.ceil(self.desc_browser.document().size().height())
+        self.desc_browser.setFixedHeight(max(int(20 * self.scale), doc_h + int(2 * self.scale)))
+        self.desc_browser.updateGeometry()
+        self.desc_card.updateGeometry()
 
     def _update_poll_section(self, poll: dict):
         """Populates the poll title, choices with vote percentages, and footer date/votes info."""
