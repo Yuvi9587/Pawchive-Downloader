@@ -275,6 +275,10 @@ class DownloaderApp (QWidget ):
         self.char_filter_scope_toggle_button = None
         self.skip_words_scope = SKIP_SCOPE_POSTS
         self.char_filter_scope = CHAR_SCOPE_TITLE
+        self.folder_scope_toggle_button = None
+        self.folder_scope = self.settings.value(FOLDER_SCOPE_KEY, FOLDER_SCOPE_TARGET, type=str)
+        if self.folder_scope not in (FOLDER_SCOPE_TARGET, FOLDER_SCOPE_CREATOR):
+            self.folder_scope = FOLDER_SCOPE_TARGET
         self.manga_filename_style = self.settings.value(MANGA_FILENAME_STYLE_KEY, STYLE_POST_TITLE, type=str)
         self.custom_manga_filename_format = self.settings.value(MANGA_CUSTOM_FORMAT_KEY, "{published} {title}", type=str)        
         self.manga_custom_date_format = self.settings.value(MANGA_CUSTOM_DATE_FORMAT_KEY, "YYYY-MM-DD", type=str) 
@@ -379,6 +383,7 @@ class DownloaderApp (QWidget ):
         self.log_signal.emit(f"ℹ️ filename style loaded: '{self.manga_filename_style}'")
         self.log_signal.emit(f"ℹ️ Skip words scope loaded: '{self.skip_words_scope}'")
         self.log_signal.emit(f"ℹ️ Character filter scope set to default: '{self.char_filter_scope}'")
+        self.log_signal.emit(f"ℹ️ Download folder scope loaded: '{self.folder_scope}'")
         self.log_signal.emit(f"ℹ️ Application language loaded: '{self.current_selected_language.upper()}' (UI may not reflect this yet).")
         self._retranslate_main_ui()
         self._load_persistent_history()
@@ -443,7 +448,8 @@ class DownloaderApp (QWidget ):
                 return base_dir
             safe_name = clean_folder_name(folder_name)
            
-            if base_dir.replace('\\', '/').rstrip('/').endswith(safe_name):
+            norm = base_dir.replace('\\', '/').rstrip('/')
+            if norm.lower().endswith('/' + safe_name.lower()) or norm.lower() == safe_name.lower():
                 return base_dir
             return os.path.join(base_dir, safe_name)
         if self.favorite_download_queue:
@@ -460,7 +466,8 @@ class DownloaderApp (QWidget ):
                 job_settings = base_settings.copy()
                 job_settings['api_url'] = real_url 
                 
-                job_settings['output_dir'] = get_creator_specific_path(job_settings['output_dir'], name)
+                if getattr(self, 'folder_scope', FOLDER_SCOPE_TARGET) == FOLDER_SCOPE_CREATOR:
+                    job_settings['output_dir'] = get_creator_specific_path(job_settings['output_dir'], name)
 
                 if self._save_single_job_file(job_settings, name_hint=name):
                     count += 1
@@ -488,22 +495,23 @@ class DownloaderApp (QWidget ):
         name_hint = "Job"
         
         if service and user_id:
-            
             cache_key = (service.lower(), str(user_id))
             cached_name = self.creator_name_cache.get(cache_key)
+            if not cached_name:
+                resolved = self.resolve_creator_name(service, user_id)
+                if resolved and not str(resolved).isdigit():
+                    cached_name = resolved
             
-            if cached_name:
-                
-                name_hint = cached_name
-                settings['output_dir'] = get_creator_specific_path(settings['output_dir'], cached_name)
-            else:
-                if post_id:
-                    folder_name = str(post_id)
-                else:
-                    folder_name = str(user_id)
-                
-                name_hint = folder_name
-                settings['output_dir'] = get_creator_specific_path(settings['output_dir'], folder_name)
+            creator_folder_name = cached_name if cached_name else str(user_id)
+            name_hint = cached_name if cached_name else (str(post_id) if post_id else str(user_id))
+            
+            if getattr(self, 'folder_scope', FOLDER_SCOPE_TARGET) == FOLDER_SCOPE_CREATOR:
+                settings['output_dir'] = get_creator_specific_path(settings['output_dir'], creator_folder_name)
+        elif getattr(self, 'folder_scope', FOLDER_SCOPE_TARGET) == FOLDER_SCOPE_CREATOR:
+            cname = getattr(self, 'last_known_creator_name', None)
+            if cname:
+                settings['output_dir'] = get_creator_specific_path(settings['output_dir'], cname)
+                name_hint = cname
 
         if self._save_single_job_file(settings, name_hint=name_hint):
             self.log_signal.emit(f"✅ Job added to queue: {url}")
@@ -604,7 +612,7 @@ class DownloaderApp (QWidget ):
             self._load_ui_from_settings_dict(settings)
             QCoreApplication.processEvents()
             
-            self.start_download()
+            self.start_download(override_output_dir=target_dir if target_dir else None)
             
         except Exception as e:
             self.log_signal.emit(f"❌ Error loading/starting job '{next_job_path}': {e}")
@@ -904,6 +912,7 @@ class DownloaderApp (QWidget ):
 
         settings['skip_words_scope'] = self.skip_words_scope
         settings['char_filter_scope'] = self.char_filter_scope
+        settings['folder_scope'] = getattr(self, 'folder_scope', FOLDER_SCOPE_TARGET)
         settings['manga_filename_style'] = self.manga_filename_style
         settings['manga_custom_filename_format'] = getattr(self, 'custom_manga_filename_format', '{published} {title}')
         settings['manga_custom_date_format'] = getattr(self, 'manga_custom_date_format', 'YYYY-MM-DD')
@@ -1377,6 +1386,7 @@ class DownloaderApp (QWidget ):
         if hasattr (self ,'dir_button'):self .dir_button .setText (self ._tr ("browse_button_text","Browse..."))
         self ._update_char_filter_scope_button_text ()
         self ._update_skip_scope_button_text ()
+        self ._update_folder_scope_button_text ()
 
         if hasattr (self ,'skip_zip_checkbox'):self .skip_zip_checkbox .setText (self ._tr ("skip_zip_checkbox_label","Skip .zip"))
         if hasattr (self ,'download_thumbnails_checkbox'):self .download_thumbnails_checkbox .setText (self ._tr ("download_thumbnails_checkbox_label","Download Thumbnails Only"))
@@ -1586,6 +1596,9 @@ class DownloaderApp (QWidget ):
 
         if self .char_filter_scope_toggle_button :
             self .char_filter_scope_toggle_button .clicked .connect (self ._cycle_char_filter_scope )
+
+        if hasattr (self ,'folder_scope_toggle_button') and self .folder_scope_toggle_button :
+            self .folder_scope_toggle_button .clicked .connect (self ._cycle_folder_scope )
 
         if hasattr (self ,'multipart_toggle_button'):self .multipart_toggle_button .clicked .connect (self ._toggle_multipart_mode )
 
@@ -2221,7 +2234,14 @@ class DownloaderApp (QWidget ):
             
         # Start download directly.
         # The is_silent_background_sync flag ensures we don't popup dialogues.
-        self.start_download()
+        sync_out_dir = None
+        if sync_settings_json:
+            try:
+                parsed_settings = json.loads(sync_settings_json)
+                sync_out_dir = parsed_settings.get('output_dir')
+            except Exception:
+                pass
+        self.start_download(override_output_dir=sync_out_dir)
         
         # Restore the full UI back to what the user had before the sync ran.
         try:
@@ -3639,7 +3659,8 @@ class DownloaderApp (QWidget ):
             self.compress_images_checkbox, self.scan_content_images_checkbox,
             self.use_cookie_checkbox, self.manga_mode_checkbox,
             self.radio_all, self.radio_images, self.radio_videos,
-            self.char_filter_scope_toggle_button, self.skip_scope_toggle_button
+            self.char_filter_scope_toggle_button, self.skip_scope_toggle_button,
+            getattr(self, 'folder_scope_toggle_button', None)
         ]
         
         for widget in widgets_to_lock:
@@ -3734,6 +3755,32 @@ class DownloaderApp (QWidget ):
         self ._update_char_filter_scope_button_text ()
         self .settings .setValue (CHAR_FILTER_SCOPE_KEY ,self .char_filter_scope )
         self .log_signal .emit (f"ℹ️ Character filter scope changed to: '{self .char_filter_scope }'")
+
+    def get_folder_scope(self):
+        return getattr(self, 'folder_scope', FOLDER_SCOPE_TARGET)
+
+    def _update_folder_scope_button_text(self):
+        if hasattr(self, 'folder_scope_toggle_button') and self.folder_scope_toggle_button:
+            current_scope = getattr(self, 'folder_scope', FOLDER_SCOPE_TARGET)
+            if current_scope == FOLDER_SCOPE_TARGET:
+                self.folder_scope_toggle_button.setText(self._tr("folder_scope_target_text", "Scope: Target"))
+                self.folder_scope_toggle_button.setToolTip(self._tr("folder_scope_target_tooltip", "Current Download Folder Scope: Target\n\nDownloads (creators, posts, and single files) will save directly into the selected Download Location.\n\nClick to change to: Scope: Creator"))
+            elif current_scope == FOLDER_SCOPE_CREATOR:
+                self.folder_scope_toggle_button.setText(self._tr("folder_scope_creator_text", "Scope: Creator"))
+                self.folder_scope_toggle_button.setToolTip(self._tr("folder_scope_creator_tooltip", "Current Download Folder Scope: Creator\n\nDownloads (creators, posts, and single files) will be saved inside a subfolder named after the Creator within the selected Download Location.\n\nClick to change to: Scope: Target"))
+            else:
+                self.folder_scope_toggle_button.setText(self._tr("folder_scope_target_text", "Scope: Target"))
+
+    def _cycle_folder_scope(self):
+        current_scope = getattr(self, 'folder_scope', FOLDER_SCOPE_TARGET)
+        if current_scope == FOLDER_SCOPE_TARGET:
+            self.folder_scope = FOLDER_SCOPE_CREATOR
+        else:
+            self.folder_scope = FOLDER_SCOPE_TARGET
+
+        self._update_folder_scope_button_text()
+        self.settings.setValue(FOLDER_SCOPE_KEY, self.folder_scope)
+        self.log_signal.emit(f"ℹ️ Download folder scope changed to: '{self.folder_scope.capitalize()}'")
 
     def _handle_ui_add_new_character (self ):
         """Handles adding a new character from the UI input field."""
@@ -4924,6 +4971,32 @@ class DownloaderApp (QWidget ):
                     return False
             effective_output_dir_for_run = os.path.normpath(main_ui_download_dir) if main_ui_download_dir else ""
 
+        if (getattr(self, 'folder_scope', FOLDER_SCOPE_TARGET) == FOLDER_SCOPE_CREATOR
+                and effective_output_dir_for_run
+                and not extract_links_only
+                and not getattr(self, 'is_export_all_links_session', False)
+                and not getattr(self, 'is_silent_background_sync', False)
+                and not override_output_dir
+                and api_url):
+            service, id1, id2 = extract_post_info(api_url)
+            creator_name = None
+            if id1:
+                creator_name = self.resolve_creator_name(service, id1) or getattr(self, 'last_known_creator_name', None) or str(id1)
+            elif getattr(self, 'last_known_creator_name', None):
+                creator_name = self.last_known_creator_name
+
+            if creator_name:
+                safe_creator_folder = clean_folder_name(str(creator_name))
+                if safe_creator_folder:
+                    norm_current = effective_output_dir_for_run.replace('\\', '/').rstrip('/')
+                    if not norm_current.lower().endswith('/' + safe_creator_folder.lower()):
+                        effective_output_dir_for_run = os.path.normpath(os.path.join(effective_output_dir_for_run, safe_creator_folder))
+                        try:
+                            os.makedirs(effective_output_dir_for_run, exist_ok=True)
+                            self.log_signal.emit(f"📁 Creator Folder Scope: Output directory set to '{effective_output_dir_for_run}'")
+                        except Exception as e:
+                            self.log_signal.emit(f"⚠️ Could not create creator folder '{effective_output_dir_for_run}': {e}")
+
         self.last_effective_download_dir = effective_output_dir_for_run
         if not is_restore and not getattr(self, 'is_export_all_links_session', False):
             self._create_initial_session_file(api_url, effective_output_dir_for_run, remaining_queue=self.favorite_download_queue)
@@ -4952,13 +5025,24 @@ class DownloaderApp (QWidget ):
             self.log_signal.emit(f"🚀 Direct media file download detected: '{api_url}'")
             target_folder = effective_output_dir_for_run or self.dir_input.text().strip() or os.path.expanduser("~/Downloads")
 
-            cname = getattr(self, 'last_known_creator_name', None) or "Creator"
-            should_create_artist_folder = (
-                self.favorite_download_scope == FAVORITE_SCOPE_ARTIST_FOLDERS
-                if hasattr(self, 'favorite_download_scope') else True
-            )
-            if should_create_artist_folder and cname:
-                target_folder = os.path.join(target_folder, clean_folder_name(cname))
+            cname = getattr(self, 'last_known_creator_name', None)
+            is_valid_cname = bool(cname and str(cname).strip().lower() not in ('creator', 'unknown', 'none', ''))
+            is_fav_mode = bool(hasattr(self, 'favorite_mode_checkbox') and self.favorite_mode_checkbox and self.favorite_mode_checkbox.isChecked())
+            if is_fav_mode:
+                should_create_artist_folder = (
+                    getattr(self, 'folder_scope', FOLDER_SCOPE_TARGET) == FOLDER_SCOPE_CREATOR
+                    or getattr(self, 'favorite_download_scope', FAVORITE_SCOPE_SELECTED_LOCATION) == FAVORITE_SCOPE_ARTIST_FOLDERS
+                )
+            else:
+                should_create_artist_folder = (
+                    getattr(self, 'folder_scope', FOLDER_SCOPE_TARGET) == FOLDER_SCOPE_CREATOR
+                )
+
+            if should_create_artist_folder and is_valid_cname:
+                safe_cname = clean_folder_name(str(cname))
+                norm_target = target_folder.replace('\\', '/').rstrip('/')
+                if not norm_target.lower().endswith('/' + safe_cname.lower()):
+                    target_folder = os.path.join(target_folder, safe_cname)
 
             post_title = getattr(self, 'last_known_post_title', '') or ""
             use_post_subfolders = getattr(self, 'use_subfolder_per_post_checkbox', None) and self.use_subfolder_per_post_checkbox.isChecked()
@@ -6333,11 +6417,13 @@ class DownloaderApp (QWidget ):
                 
             self.skip_words_scope = settings.get('skip_words_scope', SKIP_SCOPE_POSTS)
             self.char_filter_scope = settings.get('char_filter_scope', CHAR_SCOPE_TITLE)
+            self.folder_scope = settings.get('folder_scope', FOLDER_SCOPE_TARGET)
             self.manga_filename_style = settings.get('manga_filename_style', STYLE_POST_TITLE)
             self.allow_multipart_download_setting = settings.get('allow_multipart_download', False)
             
             self._update_skip_scope_button_text()
             self._update_char_filter_scope_button_text()
+            self._update_folder_scope_button_text()
             self._update_manga_filename_style_button_text()
             self._update_multipart_toggle_button_text()
 
@@ -6719,7 +6805,7 @@ class DownloaderApp (QWidget ):
     def _get_configurable_widgets_on_pause (self ):
         """Returns a list of widgets that should be re-enabled when paused."""
         return [
-        self .dir_input ,self .dir_button ,
+        self .dir_input ,self .dir_button ,getattr(self, 'folder_scope_toggle_button', None),
         self .character_input ,self .char_filter_scope_toggle_button ,
         self .skip_words_input ,self .skip_scope_toggle_button ,
         self .remove_from_filename_input ,
@@ -6746,7 +6832,7 @@ class DownloaderApp (QWidget ):
         and unlocks when the download finishes or cancels.
         """
         all_potentially_toggleable_widgets =[
-        self .link_input ,self .dir_input ,self .dir_button ,
+        self .link_input ,self .dir_input ,self .dir_button ,getattr(self, 'folder_scope_toggle_button', None),
         self .page_range_label ,self .start_page_input ,self .to_label ,self .end_page_input ,
         self .character_input ,self .char_filter_scope_toggle_button ,self .character_filter_widget ,
         self .filters_and_custom_folder_container_widget ,
@@ -6917,6 +7003,9 @@ class DownloaderApp (QWidget ):
 
         self .char_filter_scope =CHAR_SCOPE_TITLE 
         self ._update_char_filter_scope_button_text ()
+
+        self .folder_scope = FOLDER_SCOPE_TARGET
+        self ._update_folder_scope_button_text ()
 
         self .manga_filename_style =STYLE_POST_TITLE 
         self ._update_manga_filename_style_button_text ()
@@ -7890,6 +7979,7 @@ class DownloaderApp (QWidget ):
         self.active_update_profile = None
         self.settings.setValue(MANGA_FILENAME_STYLE_KEY, self.manga_filename_style)
         self.settings.setValue(SKIP_WORDS_SCOPE_KEY, self.skip_words_scope)
+        self.settings.setValue(FOLDER_SCOPE_KEY, self.folder_scope)
         self.settings.sync()
         self._update_manga_filename_style_button_text()
         self.update_ui_for_manga_mode(self.manga_mode_checkbox.isChecked() if self.manga_mode_checkbox else False)
@@ -8457,12 +8547,27 @@ class DownloaderApp (QWidget ):
             if not cname:
                 cname = self.current_processing_favorite_item_info.get('creator_name')
             if not cname:
-                cname = getattr(self, 'last_known_creator_name', None) or "Creator"
-            self.last_known_creator_name = cname
+                cname = getattr(self, 'last_known_creator_name', None)
+            is_valid_cname = bool(cname and str(cname).strip().lower() not in ('creator', 'unknown', 'none', ''))
+            if cname:
+                self.last_known_creator_name = cname
 
-            force_artist_folder = self.current_processing_favorite_item_info.get('force_artist_folder', True)
-            if force_artist_folder and cname:
-                target_folder = os.path.join(target_folder, clean_folder_name(cname))
+            is_fav_mode = bool(hasattr(self, 'favorite_mode_checkbox') and self.favorite_mode_checkbox and self.favorite_mode_checkbox.isChecked())
+            if is_fav_mode:
+                should_create_artist_folder = (
+                    getattr(self, 'folder_scope', FOLDER_SCOPE_TARGET) == FOLDER_SCOPE_CREATOR
+                    or getattr(self, 'favorite_download_scope', FAVORITE_SCOPE_SELECTED_LOCATION) == FAVORITE_SCOPE_ARTIST_FOLDERS
+                )
+            else:
+                should_create_artist_folder = (
+                    getattr(self, 'folder_scope', FOLDER_SCOPE_TARGET) == FOLDER_SCOPE_CREATOR
+                )
+
+            if should_create_artist_folder and is_valid_cname:
+                safe_cname = clean_folder_name(str(cname))
+                norm_target = target_folder.replace('\\', '/').rstrip('/')
+                if not norm_target.lower().endswith('/' + safe_cname.lower()):
+                    target_folder = os.path.join(target_folder, safe_cname)
 
             post_title = self.current_processing_favorite_item_info.get('post_title') or ""
             use_post_subfolders = getattr(self, 'use_subfolder_per_post_checkbox', None) and self.use_subfolder_per_post_checkbox.isChecked()
@@ -8544,20 +8649,21 @@ class DownloaderApp (QWidget ):
         main_download_dir = self.dir_input.text().strip()
 
         should_create_artist_folder = False
-      
+        is_fav_mode = bool(hasattr(self, 'favorite_mode_checkbox') and self.favorite_mode_checkbox and self.favorite_mode_checkbox.isChecked())
 
-        if item_type == 'creator_popup_selection' and item_scope == EmptyPopupDialog.SCOPE_CREATORS:
-            should_create_artist_folder = True 
-        elif item_type != 'creator_popup_selection' and self.favorite_download_scope == FAVORITE_SCOPE_ARTIST_FOLDERS:
+        if getattr(self, 'folder_scope', FOLDER_SCOPE_TARGET) == FOLDER_SCOPE_CREATOR:
             should_create_artist_folder = True
-        if self.current_processing_favorite_item_info.get('force_artist_folder'):
+        elif is_fav_mode and (
+            (item_type == 'creator_popup_selection' and item_scope == EmptyPopupDialog.SCOPE_CREATORS)
+            or (item_type != 'creator_popup_selection' and self.favorite_download_scope == FAVORITE_SCOPE_ARTIST_FOLDERS)
+        ):
             should_create_artist_folder = True
        
         if should_create_artist_folder and main_download_dir:
             folder_name_key = self.current_processing_favorite_item_info.get('name_for_folder', 'Unknown_Folder')
             item_specific_folder_name = clean_folder_name(folder_name_key)
             override_dir = os.path.normpath(os.path.join(main_download_dir, item_specific_folder_name))
-            self.log_signal.emit(f"    Scope requires artist folder. Target directory: '{override_dir}'")
+            self.log_signal.emit(f"    Scope requires creator folder. Target directory: '{override_dir}'")
 
         success_starting_download = self.start_download(
             direct_api_url=next_url,

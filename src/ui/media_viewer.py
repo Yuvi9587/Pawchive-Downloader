@@ -9,7 +9,8 @@ from PySide6.QtWidgets import (
     QWidget, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QSlider, QStackedWidget, QFrame, QScrollArea, QApplication,
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsItem,
-    QProgressBar, QSizePolicy, QToolTip, QMessageBox, QComboBox
+    QProgressBar, QSizePolicy, QToolTip, QMessageBox, QComboBox,
+    QStyle, QStyleOptionSlider
 )
 from PySide6.QtCore import (
     Qt, QSize, QUrl, Signal, QThread, QPoint, QRectF, QTimer, QObject, QEvent
@@ -901,6 +902,43 @@ class ImageZoomView(QGraphicsView):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  Clickable Seeking Slider
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ClickableSlider(QSlider):
+    """
+    Enhanced QSlider that jumps directly to the clicked point on the track
+    instead of advancing by a small page step, supporting direct click-to-seek and smooth dragging.
+    """
+    def __init__(self, orientation=Qt.Orientation.Horizontal, parent=None):
+        super().__init__(orientation, parent)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self.maximum() > self.minimum():
+            opt = QStyleOptionSlider()
+            self.initStyleOption(opt)
+            handle_rect = self.style().subControlRect(
+                QStyle.ComplexControl.CC_Slider, opt, QStyle.SubControl.SC_SliderHandle, self
+            )
+            hw = handle_rect.width() if handle_rect.isValid() and handle_rect.width() > 0 else 14
+            span = max(1, self.width() - hw)
+            pos = event.position().x()
+            val = QStyle.sliderValueFromPosition(
+                self.minimum(), self.maximum(),
+                int(pos - hw / 2),
+                span
+            )
+            val = max(self.minimum(), min(self.maximum(), val))
+            self.setValue(val)
+            self.sliderMoved.emit(val)
+            super().mousePressEvent(event)
+            self.setValue(val)
+        else:
+            super().mousePressEvent(event)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  Hardware-Accelerated Video Player
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -936,6 +974,14 @@ class VideoPlayerWidget(QWidget):
         # Cloud stream resolver state
         self._pending_cloud_url: str | None = None
         self._cloud_resolver = None
+
+        # Seamless fullscreen state
+        self._is_fullscreen: bool = False
+        self._normal_parent = None
+        self._normal_flags = None
+        self._normal_index: int = -1
+        self._delegate_fullscreen: bool = False
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         self._build_ui()
         self._connect_signals()
@@ -1020,7 +1066,7 @@ class VideoPlayerWidget(QWidget):
         ctrl_layout.setSpacing(4)
 
         # Row 1: Seek Slider
-        self.seek_slider = QSlider(Qt.Orientation.Horizontal)
+        self.seek_slider = ClickableSlider(Qt.Orientation.Horizontal)
         self.seek_slider.setRange(0, 0)
         ctrl_layout.addWidget(self.seek_slider)
 
@@ -1088,7 +1134,7 @@ class VideoPlayerWidget(QWidget):
         row2.addWidget(self.mute_btn)
 
         # Volume slider
-        self.vol_slider = QSlider(Qt.Orientation.Horizontal)
+        self.vol_slider = ClickableSlider(Qt.Orientation.Horizontal)
         self.vol_slider.setRange(0, 100)
         self.vol_slider.setValue(100)
         self.vol_slider.setFixedWidth(65)
@@ -1101,15 +1147,173 @@ class VideoPlayerWidget(QWidget):
         self.fs_btn.setIconSize(QSize(15, 15))
         self.fs_btn.setFixedWidth(30)
         self.fs_btn.setToolTip("Toggle Fullscreen (F11)")
-        self.fs_btn.clicked.connect(self.fullscreen_requested.emit)
+        self.fs_btn.clicked.connect(self._on_fs_btn_clicked)
         row2.addWidget(self.fs_btn)
 
         ctrl_layout.addLayout(row2)
         root.addWidget(self.controls_bar)
 
+    def _on_fs_btn_clicked(self):
+        if getattr(self, "_delegate_fullscreen", False):
+            self.fullscreen_requested.emit()
+        else:
+            self.toggle_fullscreen()
+
+    def update_fullscreen_icon(self, is_fs: bool):
+        self._is_fullscreen = is_fs
+        icon_name = "minimize.svg" if is_fs else "fullscreen.svg"
+        self.fs_btn.setIcon(QIcon(get_asset_path(f"assets/Svg/{icon_name}")))
+        self.fs_btn.setToolTip("Exit Fullscreen (F11 / Esc)" if is_fs else "Toggle Fullscreen (F11)")
+
+    def toggle_fullscreen(self):
+        """Toggles true fullscreen directly on this player without interrupting playback."""
+        if not self._is_fullscreen:
+            self._enter_fullscreen()
+        else:
+            self._exit_fullscreen()
+
+    def _enter_fullscreen(self):
+        if self._is_fullscreen:
+            return
+
+        # Identify current monitor/screen where player is viewed before detaching
+        target_screen = None
+        if hasattr(self, "screen") and self.screen():
+            target_screen = self.screen()
+        if not target_screen and self.window() and hasattr(self.window(), "screen"):
+            target_screen = self.window().screen()
+        if not target_screen:
+            try:
+                from PySide6.QtGui import QGuiApplication
+                center_pt = self.mapToGlobal(QPoint(self.width() // 2, self.height() // 2))
+                target_screen = QGuiApplication.screenAt(center_pt)
+            except Exception:
+                pass
+        if not target_screen:
+            try:
+                from PySide6.QtGui import QGuiApplication
+                target_screen = QGuiApplication.primaryScreen()
+            except Exception:
+                pass
+
+        self._normal_parent = self.parentWidget()
+        self._normal_flags = self.windowFlags()
+        if isinstance(self._normal_parent, QStackedWidget):
+            self._normal_index = self._normal_parent.indexOf(self)
+        elif self._normal_parent and self._normal_parent.layout():
+            self._normal_index = self._normal_parent.layout().indexOf(self)
+        else:
+            self._normal_index = -1
+
+        self.setParent(None)
+        self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
+
+        # Pin fullscreen window to the exact monitor the user is currently on
+        if target_screen:
+            try:
+                if hasattr(self, "setScreen"):
+                    self.setScreen(target_screen)
+                self.move(target_screen.geometry().topLeft())
+            except Exception:
+                pass
+
+        self.showFullScreen()
+        self._is_fullscreen = True
+        self.update_fullscreen_icon(True)
+        self.setFocus()
+        self.fullscreen_requested.emit()
+
+    def _exit_fullscreen(self):
+        if not self._is_fullscreen:
+            return
+        if self._normal_parent:
+            try:
+                target_screen = None
+                if hasattr(self._normal_parent, "screen") and self._normal_parent.screen():
+                    target_screen = self._normal_parent.screen()
+                elif self._normal_parent.window() and hasattr(self._normal_parent.window(), "screen"):
+                    target_screen = self._normal_parent.window().screen()
+
+                self.setParent(self._normal_parent)
+                if self._normal_flags is not None:
+                    self.setWindowFlags(self._normal_flags)
+                if target_screen and hasattr(self, "setScreen"):
+                    self.setScreen(target_screen)
+
+                if isinstance(self._normal_parent, QStackedWidget):
+                    if self._normal_index >= 0:
+                        self._normal_parent.insertWidget(self._normal_index, self)
+                    else:
+                        self._normal_parent.addWidget(self)
+                    self._normal_parent.setCurrentWidget(self)
+                elif self._normal_parent.layout():
+                    layout = self._normal_parent.layout()
+                    if self._normal_index >= 0:
+                        layout.insertWidget(self._normal_index, self)
+                    else:
+                        layout.addWidget(self)
+            except Exception:
+                pass
+        self.showNormal()
+        self.show()
+        self._is_fullscreen = False
+        self.update_fullscreen_icon(False)
+        self.fullscreen_requested.emit()
+
+    def keyPressEvent(self, event):
+        key = event.key()
+        if key in (Qt.Key.Key_Escape, Qt.Key.Key_F11) or (key == Qt.Key.Key_F and self._is_fullscreen):
+            if self._is_fullscreen:
+                self.toggle_fullscreen()
+                event.accept()
+                return
+            elif key == Qt.Key.Key_F11:
+                self.toggle_fullscreen()
+                event.accept()
+                return
+        if key == Qt.Key.Key_Space:
+            self.toggle_play()
+            event.accept()
+            return
+        if key == Qt.Key.Key_Left:
+            self.skip(-10000)
+            event.accept()
+            return
+        if key == Qt.Key.Key_Right:
+            self.skip(10000)
+            event.accept()
+            return
+        if key == Qt.Key.Key_Up:
+            self.set_volume(min(100, self.vol_slider.value() + 10))
+            event.accept()
+            return
+        if key == Qt.Key.Key_Down:
+            self.set_volume(max(0, self.vol_slider.value() - 10))
+            event.accept()
+            return
+        if key == Qt.Key.Key_M:
+            self._toggle_mute()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def closeEvent(self, event):
+        if getattr(self, "_is_fullscreen", False):
+            self._exit_fullscreen()
+        super().closeEvent(event)
+
     def eventFilter(self, watched, event):
         if watched in (getattr(self, "video_widget", None), getattr(self, "poster_label", None)):
-            if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+            if event.type() == QEvent.Type.MouseButtonDblClick and event.button() == Qt.MouseButton.LeftButton:
+                if self._has_started:
+                    self.toggle_play()  # Invert the preceding single-click play/pause
+                    if getattr(self, "_delegate_fullscreen", False):
+                        self.fullscreen_requested.emit()
+                    else:
+                        self.toggle_fullscreen()
+                    return True
+            elif event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+                self.setFocus()
                 self._on_video_area_clicked()
                 return True
         return super().eventFilter(watched, event)
@@ -1306,6 +1510,9 @@ class VideoPlayerWidget(QWidget):
         else:
             self.play()
 
+    def _toggle_play(self):
+        self.toggle_play()
+
     def play(self):
         if not self._has_started:
             self._start_media()
@@ -1333,6 +1540,8 @@ class VideoPlayerWidget(QWidget):
         self.player.setPosition(new_pos)
 
     def stop_and_release(self):
+        if getattr(self, "_is_fullscreen", False):
+            self._exit_fullscreen()
         if hasattr(self, "loading_overlay"):
             self.loading_overlay.stop_loading()
         # Stop any active cloud resolver / MEGA proxy
@@ -1355,6 +1564,7 @@ class VideoPlayerWidget(QWidget):
 
     def _on_slider_pressed(self):
         self._is_user_scrubbing = True
+        self.player.setPosition(self.seek_slider.value())
 
     def _on_slider_released(self):
         self._is_user_scrubbing = False
@@ -1994,6 +2204,20 @@ class PawchiveMediaViewerDialog(QDialog):
         self._is_fullscreen = False
         self._loaded_full_res_indices = set()
 
+        # Target parent window's monitor
+        if parent:
+            target_screen = None
+            if hasattr(parent, "screen") and parent.screen():
+                target_screen = parent.screen()
+            elif parent.window() and hasattr(parent.window(), "screen"):
+                target_screen = parent.window().screen()
+            if target_screen and hasattr(self, "setScreen"):
+                try:
+                    self.setScreen(target_screen)
+                    self.move(target_screen.geometry().topLeft() + QPoint(40, 40))
+                except Exception:
+                    pass
+
         self.setWindowTitle(f"Media Viewer — {self.post.get('title', 'Pawchive')}")
         self.resize(int(1050 * scale), int(720 * scale))
         self.setStyleSheet("background-color: #12141A; color: #FFFFFF;")
@@ -2150,6 +2374,7 @@ class PawchiveMediaViewerDialog(QDialog):
 
         # View 0: Video Player
         self.video_player = VideoPlayerWidget(self.media_stack)
+        self.video_player._delegate_fullscreen = True
         self.video_player.fullscreen_requested.connect(self.toggle_fullscreen)
         self.media_stack.addWidget(self.video_player)
 
@@ -2670,6 +2895,17 @@ class PawchiveMediaViewerDialog(QDialog):
     def toggle_fullscreen(self):
         self._is_fullscreen = not self._is_fullscreen
         if self._is_fullscreen:
+            target_screen = None
+            if hasattr(self, "screen") and self.screen():
+                target_screen = self.screen()
+            elif self.parentWidget() and hasattr(self.parentWidget(), "screen"):
+                target_screen = self.parentWidget().screen()
+            if target_screen and hasattr(self, "setScreen"):
+                try:
+                    self.setScreen(target_screen)
+                    self.move(target_screen.geometry().topLeft())
+                except Exception:
+                    pass
             self.showFullScreen()
             self.fs_toggle_btn.setIcon(QIcon(get_asset_path("assets/Svg/minimize.svg")))
             self.fs_toggle_btn.setText("")
@@ -2677,6 +2913,8 @@ class PawchiveMediaViewerDialog(QDialog):
             self.showNormal()
             self.fs_toggle_btn.setIcon(QIcon(get_asset_path("assets/Svg/fullscreen.svg")))
             self.fs_toggle_btn.setText("")
+        if hasattr(self, "video_player"):
+            self.video_player.update_fullscreen_icon(self._is_fullscreen)
 
     def _copy_current_url(self):
         if not self.media_items:

@@ -1470,7 +1470,7 @@ class PostDetailView(QWidget):
         self.embedded_viewer_stack.setMinimumHeight(int(580 * scale))
 
         self.video_player = VideoPlayerWidget(parent=self.embedded_viewer_stack, scale=self.scale)
-        self.video_player.fullscreen_requested.connect(self._open_fullscreen_viewer)
+        # video_player manages its own native borderless fullscreen seamlessly without interrupting playback
         self.image_view = ImageZoomView(parent=self.embedded_viewer_stack, scale=self.scale)
         self.image_view.load_full_res_requested.connect(self._on_image_load_hd_requested)
         self.gif_player = GifPlayerWidget(parent=self.embedded_viewer_stack, scale=self.scale)
@@ -3184,6 +3184,9 @@ class PostDetailView(QWidget):
     def _open_fullscreen_viewer(self):
         if not self.post:
             return
+        if self.embedded_viewer_stack.currentIndex() == 0 and hasattr(self, "video_player"):
+            self.video_player.toggle_fullscreen()
+            return
         if hasattr(self, "video_player"):
             try:
                 self.video_player.pause()
@@ -3674,14 +3677,17 @@ class PostDetailView(QWidget):
             self._zoom_in()
         elif key == Qt.Key.Key_Minus:
             self._zoom_out()
-        elif key == Qt.Key.Key_F:
-            self._open_fullscreen_viewer()
+        elif key in (Qt.Key.Key_F, Qt.Key.Key_F11):
+            if self.embedded_viewer_stack.currentIndex() == 0 and hasattr(self, "video_player"):
+                self.video_player.toggle_fullscreen()
+            else:
+                self._open_fullscreen_viewer()
         elif key == Qt.Key.Key_R:
             self._zoom_rotate()
         elif key == Qt.Key.Key_Space:
-            if self.embedded_viewer_stack.currentIndex() == 1:
-                self.video_player._toggle_play()
-            elif self.embedded_viewer_stack.currentIndex() == 2:
+            if self.embedded_viewer_stack.currentIndex() == 0 and hasattr(self, "video_player"):
+                self.video_player.toggle_play()
+            elif self.embedded_viewer_stack.currentIndex() == 2 and hasattr(self, "gif_player"):
                 self.gif_player._toggle_play()
         else:
             super().keyPressEvent(event)

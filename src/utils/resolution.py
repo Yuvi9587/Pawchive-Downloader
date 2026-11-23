@@ -256,11 +256,14 @@ def setup_ui(main_app):
     dir_row.setSpacing(int(5 * scale))
     main_app.dir_input = QLineEdit()
     main_app.dir_input.setPlaceholderText("Select folder where downloads will be saved")
+    main_app.folder_scope_toggle_button = QPushButton()
+    main_app._update_folder_scope_button_text()
     main_app.dir_button = QPushButton("  Browse…")
     main_app.dir_button.setIcon(QIcon(get_asset_path("assets/Svg/add.svg")))
     main_app.dir_button.setIconSize(QSize(int(14 * scale), int(14 * scale)))
     main_app.dir_button.clicked.connect(main_app.browse_directory)
     dir_row.addWidget(main_app.dir_input, 1)
+    dir_row.addWidget(main_app.folder_scope_toggle_button)
     dir_row.addWidget(main_app.dir_button)
     lv.addLayout(dir_row)
 
@@ -983,6 +986,7 @@ def setup_ui(main_app):
     main_app._update_manga_filename_style_button_text()
     main_app._update_skip_scope_button_text()
     main_app._update_char_filter_scope_button_text()
+    main_app._update_folder_scope_button_text()
     main_app._update_multithreading_for_date_mode()
 
     if hasattr(main_app, 'download_thumbnails_checkbox'):
