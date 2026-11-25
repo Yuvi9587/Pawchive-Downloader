@@ -30,14 +30,14 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QFileDialog, QMessageBox, QListWidget, QRadioButton,
     QButtonGroup, QCheckBox, QSplitter, QGroupBox, QDialog, QStackedWidget,
     QScrollArea, QListWidgetItem, QSizePolicy, QProgressBar, QAbstractItemView, QFrame,
-    QMainWindow, QGridLayout, QSystemTrayIcon, QMenu
+    QMainWindow, QGridLayout, QSystemTrayIcon, QMenu, QDateEdit
 )
 try:
     from PIL import Image
 except ImportError:
     Image = None
 
-from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer, QSettings, QStandardPaths, QUrl, QSize, QProcess, QMutex, QMutexLocker, QCoreApplication
+from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer, QSettings, QStandardPaths, QUrl, QSize, QProcess, QMutex, QMutexLocker, QCoreApplication, QDate
 from ..services.drive_downloader import (
     download_mega_file as drive_download_mega_file,
     download_gdrive_file,
@@ -46,7 +46,7 @@ from ..services.drive_downloader import (
 )
 from ..core.workers import DownloadThread as BackendDownloadThread, PostProcessorWorker, PostProcessorSignals
 from ..services.multipart_downloader import download_file_in_parts, MULTIPART_DOWNLOADER_AVAILABLE
-from ..core.api_client import download_from_api, fetch_creator_profile
+from ..core.api_client import download_from_api, fetch_creator_profile, evaluate_post_date
 from ..core.discord_client import fetch_server_channels, fetch_channel_messages 
 from ..core.manager import DownloadManager
 from ..core.platform_database import PlatformDatabaseManager
@@ -279,6 +279,17 @@ class DownloaderApp (QWidget ):
         self.folder_scope = self.settings.value(FOLDER_SCOPE_KEY, FOLDER_SCOPE_TARGET, type=str)
         if self.folder_scope not in (FOLDER_SCOPE_TARGET, FOLDER_SCOPE_CREATOR):
             self.folder_scope = FOLDER_SCOPE_TARGET
+        self.date_filter_checkbox = None
+        self.date_filter_mode_button = None
+        self.date_filter_start_input = None
+        self.date_filter_end_input = None
+        self.date_filter_sep_label = None
+        self.date_filter_enabled = self.settings.value(DATE_FILTER_ENABLED_KEY, False, type=bool)
+        self.date_filter_mode = self.settings.value(DATE_FILTER_MODE_KEY, DATE_FILTER_EXACT, type=str)
+        if self.date_filter_mode not in (DATE_FILTER_EXACT, DATE_FILTER_AFTER, DATE_FILTER_BEFORE, DATE_FILTER_RANGE):
+            self.date_filter_mode = DATE_FILTER_EXACT
+        self.date_filter_start = self.settings.value(DATE_FILTER_START_KEY, "", type=str)
+        self.date_filter_end = self.settings.value(DATE_FILTER_END_KEY, "", type=str)
         self.manga_filename_style = self.settings.value(MANGA_FILENAME_STYLE_KEY, STYLE_POST_TITLE, type=str)
         self.custom_manga_filename_format = self.settings.value(MANGA_CUSTOM_FORMAT_KEY, "{published} {title}", type=str)        
         self.manga_custom_date_format = self.settings.value(MANGA_CUSTOM_DATE_FORMAT_KEY, "YYYY-MM-DD", type=str) 
@@ -870,7 +881,8 @@ class DownloaderApp (QWidget ):
             'manga_mode_checkbox': 'manga_mode_active',
             'scan_content_images_checkbox': 'scan_content_for_images',
             'use_cookie_checkbox': 'use_cookie',
-            'revisions_checkbox': 'download_revisions'
+            'revisions_checkbox': 'download_revisions',
+            'date_filter_checkbox': 'date_filter_enabled'
         }
 
     def is_visual_sort_active(self) -> bool:
@@ -923,6 +935,10 @@ class DownloaderApp (QWidget ):
         settings['single_pdf_setting'] = self.single_pdf_setting
         settings['add_info_in_pdf'] = self.add_info_in_pdf_setting
         settings['combined_download_pdf'] = getattr(self, 'combined_download_pdf_setting', False)
+        settings['date_filter_enabled'] = self.date_filter_checkbox.isChecked() if hasattr(self, 'date_filter_checkbox') else False
+        settings['date_filter_mode'] = getattr(self, 'date_filter_mode', 'exact')
+        settings['date_filter_start'] = self.date_filter_start_input.date().toString("yyyy-MM-dd") if hasattr(self, 'date_filter_start_input') else ""
+        settings['date_filter_end'] = self.date_filter_end_input.date().toString("yyyy-MM-dd") if hasattr(self, 'date_filter_end_input') else ""
         settings['keep_duplicates_mode'] = self.keep_duplicates_mode
         settings['keep_duplicates_limit'] = self.keep_duplicates_limit
         settings['user_data_path'] = getattr(self, 'user_data_path', "")        
@@ -1387,6 +1403,10 @@ class DownloaderApp (QWidget ):
         self ._update_char_filter_scope_button_text ()
         self ._update_skip_scope_button_text ()
         self ._update_folder_scope_button_text ()
+        self ._update_date_filter_mode_button_text ()
+        if hasattr(self, 'date_filter_checkbox') and self.date_filter_checkbox:
+            self.date_filter_checkbox.setText(self._tr("date_filter_checkbox_text", "Filter by Date:"))
+            self.date_filter_checkbox.setToolTip(self._tr("date_filter_checkbox_tooltip", "Only download posts matching the selected date or range."))
 
         if hasattr (self ,'skip_zip_checkbox'):self .skip_zip_checkbox .setText (self ._tr ("skip_zip_checkbox_label","Skip .zip"))
         if hasattr (self ,'download_thumbnails_checkbox'):self .download_thumbnails_checkbox .setText (self ._tr ("download_thumbnails_checkbox_label","Download Thumbnails Only"))
@@ -3660,7 +3680,11 @@ class DownloaderApp (QWidget ):
             self.use_cookie_checkbox, self.manga_mode_checkbox,
             self.radio_all, self.radio_images, self.radio_videos,
             self.char_filter_scope_toggle_button, self.skip_scope_toggle_button,
-            getattr(self, 'folder_scope_toggle_button', None)
+            getattr(self, 'folder_scope_toggle_button', None),
+            getattr(self, 'date_filter_checkbox', None),
+            getattr(self, 'date_filter_mode_button', None),
+            getattr(self, 'date_filter_start_input', None),
+            getattr(self, 'date_filter_end_input', None)
         ]
         
         for widget in widgets_to_lock:
@@ -3781,6 +3805,49 @@ class DownloaderApp (QWidget ):
         self._update_folder_scope_button_text()
         self.settings.setValue(FOLDER_SCOPE_KEY, self.folder_scope)
         self.log_signal.emit(f"ℹ️ Download folder scope changed to: '{self.folder_scope.capitalize()}'")
+
+    def _update_date_filter_mode_button_text(self):
+        if not hasattr(self, 'date_filter_mode_button') or not self.date_filter_mode_button:
+            return
+        mode = getattr(self, 'date_filter_mode', DATE_FILTER_EXACT)
+        mode_labels = {
+            DATE_FILTER_EXACT: self._tr("date_filter_mode_exact_text", "Exact Date"),
+            DATE_FILTER_AFTER: self._tr("date_filter_mode_after_text", "On or After (≥)"),
+            DATE_FILTER_BEFORE: self._tr("date_filter_mode_before_text", "On or Before (≤)"),
+            DATE_FILTER_RANGE: self._tr("date_filter_mode_range_text", "Date Range"),
+        }
+        self.date_filter_mode_button.setText(mode_labels.get(mode, "Exact Date"))
+        is_range = (mode == DATE_FILTER_RANGE)
+        if hasattr(self, 'date_filter_sep_label') and self.date_filter_sep_label:
+            self.date_filter_sep_label.setVisible(is_range)
+        if hasattr(self, 'date_filter_end_input') and self.date_filter_end_input:
+            self.date_filter_end_input.setVisible(is_range)
+            is_enabled = self.date_filter_checkbox.isChecked() if hasattr(self, 'date_filter_checkbox') and self.date_filter_checkbox else False
+            self.date_filter_end_input.setEnabled(is_enabled and is_range)
+
+    def _on_date_filter_mode_clicked(self):
+        modes = [DATE_FILTER_EXACT, DATE_FILTER_AFTER, DATE_FILTER_BEFORE, DATE_FILTER_RANGE]
+        curr_mode = getattr(self, 'date_filter_mode', DATE_FILTER_EXACT)
+        try:
+            curr_idx = modes.index(curr_mode)
+            next_mode = modes[(curr_idx + 1) % len(modes)]
+        except ValueError:
+            next_mode = DATE_FILTER_EXACT
+        self.date_filter_mode = next_mode
+        self.settings.setValue(DATE_FILTER_MODE_KEY, next_mode)
+        self._update_date_filter_mode_button_text()
+        self.log_signal.emit(f"ℹ️ Date filter mode set to: '{next_mode}'")
+
+    def _on_date_filter_checkbox_toggled(self, checked: bool):
+        self.date_filter_enabled = checked
+        self.settings.setValue(DATE_FILTER_ENABLED_KEY, checked)
+        if hasattr(self, 'date_filter_mode_button') and self.date_filter_mode_button:
+            self.date_filter_mode_button.setEnabled(checked)
+        if hasattr(self, 'date_filter_start_input') and self.date_filter_start_input:
+            self.date_filter_start_input.setEnabled(checked)
+        if hasattr(self, 'date_filter_end_input') and self.date_filter_end_input:
+            self.date_filter_end_input.setEnabled(checked and getattr(self, 'date_filter_mode', DATE_FILTER_EXACT) == DATE_FILTER_RANGE)
+        self.log_signal.emit(f"ℹ️ Date filter {'enabled' if checked else 'disabled'}")
 
     def _handle_ui_add_new_character (self ):
         """Handles adding a new character from the UI input field."""
@@ -5725,7 +5792,11 @@ class DownloaderApp (QWidget ):
             'download_revisions': self.revisions_checkbox.isChecked() if hasattr(self, 'revisions_checkbox') else False,                
             'visual_sort_active': self.is_visual_sort_active(),
             'user_data_path': getattr(self, 'user_data_path', ""),
-            'export_all_links_mode': getattr(self, 'is_export_all_links_session', False)
+            'export_all_links_mode': getattr(self, 'is_export_all_links_session', False),
+            'date_filter_enabled': self.date_filter_checkbox.isChecked() if hasattr(self, 'date_filter_checkbox') and self.date_filter_checkbox else False,
+            'date_filter_mode': getattr(self, 'date_filter_mode', DATE_FILTER_EXACT),
+            'date_filter_start': self.date_filter_start_input.date().toString("yyyy-MM-dd") if hasattr(self, 'date_filter_start_input') and self.date_filter_start_input else "",
+            'date_filter_end': self.date_filter_end_input.date().toString("yyyy-MM-dd") if hasattr(self, 'date_filter_end_input') and self.date_filter_end_input else ""
         }
 
         args_template['override_output_dir'] = override_output_dir
@@ -5752,7 +5823,11 @@ class DownloaderApp (QWidget ):
                 'manga_filename_style_for_sort_check': self.manga_filename_style,
                 'processed_post_ids': processed_post_ids_for_this_run,
                 'fetch_all_first': True,
-                'proxies': self._get_current_ui_settings_as_dict().get('proxies')
+                'proxies': self._get_current_ui_settings_as_dict().get('proxies'),
+                'date_filter_enabled': args_template.get('date_filter_enabled', False),
+                'date_filter_mode': args_template.get('date_filter_mode', DATE_FILTER_EXACT),
+                'date_filter_start': args_template.get('date_filter_start', ''),
+                'date_filter_end': args_template.get('date_filter_end', '')
             }
             
             self.download_thread = threading.Thread(target=self._run_fetch_only_thread, args=(fetch_thread_args,), daemon=True)
@@ -5789,8 +5864,8 @@ class DownloaderApp (QWidget ):
                     'archive_only_mode', 'skip_file_size_mb', 
                     'manga_custom_filename_format','manga_custom_date_format', 'manga_custom_suffix_format', 'sfp_threshold', 'min_files_threshold', 'download_revisions', 'creator_name_cache',
                     'proxies', 'visual_sort_active', 'user_data_path', 'add_info_in_pdf', 'create_postid_files',
-                    'combined_download_pdf'
-
+                    'combined_download_pdf',
+                    'date_filter_enabled', 'date_filter_mode', 'date_filter_start', 'date_filter_end'
                 ]
                 args_template['skip_current_file_flag'] = None
                 single_thread_args = {key: args_template[key] for key in dt_expected_keys if key in args_template}
@@ -6427,6 +6502,22 @@ class DownloaderApp (QWidget ):
             self._update_manga_filename_style_button_text()
             self._update_multipart_toggle_button_text()
 
+            if 'date_filter_enabled' in settings:
+                self.date_filter_enabled = bool(settings['date_filter_enabled'])
+                if hasattr(self, 'date_filter_checkbox') and self.date_filter_checkbox:
+                    self.date_filter_checkbox.setChecked(self.date_filter_enabled)
+            if 'date_filter_mode' in settings:
+                self.date_filter_mode = settings['date_filter_mode']
+                self._update_date_filter_mode_button_text()
+            if 'date_filter_start' in settings and hasattr(self, 'date_filter_start_input') and self.date_filter_start_input:
+                d = QDate.fromString(settings['date_filter_start'], "yyyy-MM-dd")
+                if d.isValid():
+                    self.date_filter_start_input.setDate(d)
+            if 'date_filter_end' in settings and hasattr(self, 'date_filter_end_input') and self.date_filter_end_input:
+                d = QDate.fromString(settings['date_filter_end'], "yyyy-MM-dd")
+                if d.isValid():
+                    self.date_filter_end_input.setDate(d)
+
             if 'proxy_enabled' in settings:
                 self.settings.setValue(PROXY_ENABLED_KEY, settings['proxy_enabled'])
             if 'proxy_host' in settings:
@@ -6512,7 +6603,11 @@ class DownloaderApp (QWidget ):
                 manga_filename_style_for_sort_check=worker_args_template.get('manga_filename_style'),
                 processed_post_ids=worker_args_template.get('processed_post_ids', []),
                 fetch_all_first=worker_args_template.get('fetch_first', False),
-                proxies=worker_args_template.get('proxies')
+                proxies=worker_args_template.get('proxies'),
+                date_filter_enabled=worker_args_template.get('date_filter_enabled', False),
+                date_filter_mode=worker_args_template.get('date_filter_mode', 'exact'),
+                date_filter_start=worker_args_template.get('date_filter_start', ''),
+                date_filter_end=worker_args_template.get('date_filter_end', '')
             )
 
             ppw_expected_keys = list(PostProcessorWorker.__init__.__code__.co_varnames)[1:PostProcessorWorker.__init__.__code__.co_argcount]
@@ -6543,6 +6638,16 @@ class DownloaderApp (QWidget ):
                     new_posts_to_process = [
                         post for post in posts_batch_from_api if post.get('id') not in processed_post_ids_set
                     ]
+
+                    # Defense in depth: ensure date filter matching before queuing
+                    if worker_args_template.get('date_filter_enabled', False):
+                        df_m = worker_args_template.get('date_filter_mode', 'exact')
+                        df_s = worker_args_template.get('date_filter_start', '')
+                        df_e = worker_args_template.get('date_filter_end', '')
+                        new_posts_to_process = [
+                            p for p in new_posts_to_process
+                            if evaluate_post_date(p, df_m, df_s, df_e)[0]
+                        ]
 
                     if getattr(self, 'is_silent_background_sync', False) and max_pages > 0:
                         pages_fetched += 1
@@ -6846,7 +6951,9 @@ class DownloaderApp (QWidget ):
         self .external_links_checkbox ,self .manga_mode_checkbox ,self .manga_rename_toggle_button ,self .use_cookie_checkbox ,self .cookie_text_input ,self .cookie_browse_button ,
         self .multipart_toggle_button ,self .radio_only_audio ,
         self .character_search_input ,self .new_char_input ,self .add_char_button ,self .add_to_filter_button ,self .delete_char_button ,
-        self .reset_button, self.radio_more, getattr(self, 'checkbox_more', None), self.keep_duplicates_checkbox
+        self .reset_button, self.radio_more, getattr(self, 'checkbox_more', None), self.keep_duplicates_checkbox,
+        getattr(self, 'date_filter_checkbox', None), getattr(self, 'date_filter_mode_button', None),
+        getattr(self, 'date_filter_start_input', None), getattr(self, 'date_filter_end_input', None)
         ]
 
         widgets_to_enable_on_pause =self ._get_configurable_widgets_on_pause ()
@@ -6917,6 +7024,16 @@ class DownloaderApp (QWidget ):
         subfolders_currently_on =self .use_subfolders_checkbox .isChecked ()
         if self.use_subfolder_per_post_checkbox :
             self.use_subfolder_per_post_checkbox .setEnabled (enabled or (self .is_paused and self.use_subfolder_per_post_checkbox in widgets_to_enable_on_pause ))
+
+        if hasattr(self, 'date_filter_checkbox') and self.date_filter_checkbox:
+            df_checked = self.date_filter_checkbox.isChecked() and enabled
+            if hasattr(self, 'date_filter_mode_button') and self.date_filter_mode_button:
+                self.date_filter_mode_button.setEnabled(df_checked)
+            if hasattr(self, 'date_filter_start_input') and self.date_filter_start_input:
+                self.date_filter_start_input.setEnabled(df_checked)
+            if hasattr(self, 'date_filter_end_input') and self.date_filter_end_input:
+                is_range = (getattr(self, 'date_filter_mode', DATE_FILTER_EXACT) == DATE_FILTER_RANGE)
+                self.date_filter_end_input.setEnabled(df_checked and is_range)
         if self .cancel_btn :self .cancel_btn .setEnabled (download_is_active_or_paused and not getattr(self, 'is_silent_background_sync', False))
         if self .pause_btn :
             self .pause_btn .setEnabled (download_is_active_or_paused and not getattr(self, 'is_silent_background_sync', False))
@@ -7006,6 +7123,16 @@ class DownloaderApp (QWidget ):
 
         self .folder_scope = FOLDER_SCOPE_TARGET
         self ._update_folder_scope_button_text ()
+
+        self.date_filter_enabled = False
+        self.date_filter_mode = DATE_FILTER_EXACT
+        if hasattr(self, 'date_filter_checkbox') and self.date_filter_checkbox:
+            self.date_filter_checkbox.setChecked(False)
+        self._update_date_filter_mode_button_text()
+        if hasattr(self, 'date_filter_start_input') and self.date_filter_start_input:
+            self.date_filter_start_input.setDate(QDate.currentDate())
+        if hasattr(self, 'date_filter_end_input') and self.date_filter_end_input:
+            self.date_filter_end_input.setDate(QDate.currentDate())
 
         self .manga_filename_style =STYLE_POST_TITLE 
         self ._update_manga_filename_style_button_text ()

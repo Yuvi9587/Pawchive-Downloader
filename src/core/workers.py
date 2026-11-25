@@ -174,7 +174,11 @@ class PostProcessorWorker:
                  export_all_links_mode=False,
                  retry_404_errors=False,
                  create_postid_files=True,
-                 combined_download_pdf=False
+                 combined_download_pdf=False,
+                 date_filter_enabled=False,
+                 date_filter_mode="exact",
+                 date_filter_start="",
+                 date_filter_end=""
                  ):
         # self.db is initialized below based on the api_url
         self.post = post_data
@@ -259,6 +263,10 @@ class PostProcessorWorker:
         self.user_data_path = user_data_path
         self.retry_404_errors = retry_404_errors
         self.combined_download_pdf = combined_download_pdf
+        self.date_filter_enabled = date_filter_enabled
+        self.date_filter_mode = date_filter_mode
+        self.date_filter_start = date_filter_start
+        self.date_filter_end = date_filter_end
         
         if 'kemono' in self.api_url_input.lower():
             self.db = DatabaseManager()
@@ -1884,6 +1892,39 @@ class PostProcessorWorker:
                 self._emit_signal('worker_finished', result_tuple)
                 return result_tuple
 
+            if getattr(self, 'date_filter_enabled', False) and getattr(self, 'date_filter_mode', None):
+                post_date_raw = post_data.get('published') or post_data.get('added') or ""
+                post_date = str(post_date_raw).strip()[:10] if len(str(post_date_raw).strip()) >= 10 else ""
+                df_mode = self.date_filter_mode
+                start_d = getattr(self, 'date_filter_start', '') or ""
+                end_d = getattr(self, 'date_filter_end', '') or start_d
+
+                date_matched = False
+                if post_date:
+                    if df_mode == 'exact':
+                        date_matched = (post_date == start_d)
+                    elif df_mode == 'after':
+                        date_matched = (post_date >= start_d)
+                    elif df_mode == 'before':
+                        date_matched = (post_date <= end_d)
+                    elif df_mode == 'range':
+                        date_matched = (start_d <= post_date <= end_d)
+
+                if not date_matched:
+                    crit_desc = f"'{start_d}'" if df_mode == 'exact' else (f"on/after '{start_d}'" if df_mode == 'after' else (f"on/before '{end_d}'" if df_mode == 'before' else f"'{start_d}' to '{end_d}'"))
+                    self.logger(f"   -> Skip Post (Date Filter): Post date '{post_date or 'Unknown'}' does not match {crit_desc}.")
+                    history_data_for_skipped_post = {
+                        'post_title': post_title, 'post_id': post_id,
+                        'top_file_name': "N/A (Skipped by Date Filter)",
+                        'num_files': num_potential_files_in_post,
+                        'upload_date_str': post_date or "Unknown",
+                        'download_location': "N/A",
+                        'service': self.service, 'user_id': self.user_id,
+                    }
+                    result_tuple = (0, num_potential_files_in_post, [], [], [], history_data_for_skipped_post, None)
+                    self._emit_signal('worker_finished', result_tuple)
+                    return result_tuple
+
             post_is_candidate_by_title_char_match = False
             char_filter_that_matched_title = None
             post_is_candidate_by_comment_char_match = False
@@ -3099,7 +3140,11 @@ class DownloadThread(QThread):
                  user_data_path=None,
                  add_info_in_pdf=False,
                  create_postid_files=True,
-                 combined_download_pdf=False
+                 combined_download_pdf=False,
+                 date_filter_enabled=False,
+                 date_filter_mode="exact",
+                 date_filter_start="",
+                 date_filter_end=""
                  ): 
 
         super().__init__()
@@ -3185,6 +3230,10 @@ class DownloadThread(QThread):
         self.add_info_in_pdf = add_info_in_pdf
         self.create_postid_files = create_postid_files
         self.combined_download_pdf = combined_download_pdf
+        self.date_filter_enabled = date_filter_enabled
+        self.date_filter_mode = date_filter_mode
+        self.date_filter_start = date_filter_start
+        self.date_filter_end = date_filter_end
 
         if self.compress_images and Image is None:
             self.logger("⚠️ Image compression disabled: Pillow library not found (DownloadThread).")
@@ -3250,7 +3299,11 @@ class DownloadThread(QThread):
                 manga_filename_style_for_sort_check=self.manga_filename_style if self.manga_mode_active else None,
                 processed_post_ids=self.processed_post_ids_set,
                 fetch_all_first=self.fetch_first,
-                proxies=self.proxies 
+                proxies=self.proxies,
+                date_filter_enabled=getattr(self, 'date_filter_enabled', False),
+                date_filter_mode=getattr(self, 'date_filter_mode', 'exact'),
+                date_filter_start=getattr(self, 'date_filter_start', ''),
+                date_filter_end=getattr(self, 'date_filter_end', '')
             )
 
             processed_count_for_delay = 0
@@ -3346,7 +3399,11 @@ class DownloadThread(QThread):
                         'user_data_path': self.user_data_path,
                         'add_info_in_pdf': self.add_info_in_pdf,
                         'create_postid_files': self.create_postid_files,
-                        'combined_download_pdf': self.combined_download_pdf
+                        'combined_download_pdf': self.combined_download_pdf,
+                        'date_filter_enabled': self.date_filter_enabled,
+                        'date_filter_mode': self.date_filter_mode,
+                        'date_filter_start': self.date_filter_start,
+                        'date_filter_end': self.date_filter_end
                     }
 
                     post_processing_worker = PostProcessorWorker(**worker_args)

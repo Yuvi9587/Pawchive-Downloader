@@ -200,7 +200,11 @@ class DownloadManager:
                     cancellation_event=self.cancellation_event,
                     pause_event=self.pause_event,
                     cookies_dict=None,
-                    proxies=proxies
+                    proxies=proxies,
+                    date_filter_enabled=config.get('date_filter_enabled', False),
+                    date_filter_mode=config.get('date_filter_mode', 'exact'),
+                    date_filter_start=config.get('date_filter_start', ''),
+                    date_filter_end=config.get('date_filter_end', '')
                 )
 
                 for post_batch in post_generator:
@@ -272,7 +276,11 @@ class DownloadManager:
             'proxies': proxies,
             'download_revisions': config.get('download_revisions', False),
             'visual_sort_active': config.get('visual_sort_active', False),
-            'user_data_path': config.get('user_data_path', None)
+            'user_data_path': config.get('user_data_path', None),
+            'date_filter_enabled': config.get('date_filter_enabled', False),
+            'date_filter_mode': config.get('date_filter_mode', 'exact'),
+            'date_filter_start': config.get('date_filter_start', ''),
+            'date_filter_end': config.get('date_filter_end', '')
         }
         
     def _setup_creator_profile(self, config):

@@ -13,15 +13,19 @@ from PySide6.QtWidgets import (
     QComboBox, QTableView, QHeaderView, QAbstractItemView, QFrame,
     QProgressBar, QMenu, QApplication, QDialog, QMessageBox, QListView,
     QStyledItemDelegate, QStackedWidget, QStyleOptionViewItem, QStyle,
-    QScrollArea, QTextBrowser
+    QScrollArea, QTextBrowser, QDateEdit, QCheckBox
 )
 from PySide6.QtCore import (
     Qt, QSize, QThread, Signal, QAbstractTableModel, QModelIndex, QTimer, QUrl,
-    QThreadPool, QRunnable, QObject, QRectF, QPoint
+    QThreadPool, QRunnable, QObject, QRectF, QPoint, QDate
 )
 from PySide6.QtGui import (
     QIcon, QColor, QFont, QDesktopServices, QPainter, QPainterPath,
     QLinearGradient, QPen, QBrush, QPixmap, QFontMetrics
+)
+
+from ..config.constants import (
+    DATE_FILTER_EXACT, DATE_FILTER_AFTER, DATE_FILTER_BEFORE, DATE_FILTER_RANGE
 )
 
 from ..ui.assets import get_asset_path, get_asset_html_path
@@ -1278,20 +1282,48 @@ class PostsTableModel(QAbstractTableModel):
         if self.on_selection_changed:
             self.on_selection_changed()
 
-    def filter_posts(self, query=""):
+    def filter_posts(self, query="", date_filter=None):
         self.beginResetModel()
-        query = query.strip().lower()
-        if not query:
-            self._filtered_posts = list(self._all_posts)
-        else:
-            self._filtered_posts = [
-                p for p in self._all_posts
-                if query in (p.get("title") or "").lower()
+        query = (query or "").strip().lower()
+
+        def _match_date(p):
+            if not date_filter or not date_filter.get("enabled"):
+                return True
+            raw = str(p.get("published") or p.get("added") or "").strip()[:10]
+            if not raw:
+                return False
+            mode = date_filter.get("mode", DATE_FILTER_EXACT)
+            start = (date_filter.get("start") or "").strip()
+            end = (date_filter.get("end") or "").strip()
+            if mode == DATE_FILTER_EXACT:
+                return raw == start
+            elif mode == DATE_FILTER_AFTER:
+                return raw >= start
+            elif mode == DATE_FILTER_BEFORE:
+                return raw <= start
+            elif mode == DATE_FILTER_RANGE:
+                if start and end:
+                    s_min, s_max = min(start, end), max(start, end)
+                    return s_min <= raw <= s_max
+                elif start:
+                    return raw >= start
+                elif end:
+                    return raw <= end
+            return True
+
+        def _match_query(p):
+            if not query:
+                return True
+            return (
+                query in (p.get("title") or "").lower()
                 or query in str(p.get("id") or "").lower()
                 or query in str(p.get("_creator_name") or "").lower()
                 or query in str(p.get("_creator_service") or "").lower()
                 or query in (p.get("content") or "").lower()
-            ]
+                or query in str(p.get("published") or p.get("added") or "")[:10]
+            )
+
+        self._filtered_posts = [p for p in self._all_posts if _match_query(p) and _match_date(p)]
         self.endResetModel()
 
     def select_all(self, select=True):
@@ -1940,8 +1972,11 @@ class PostsTabWidget(QWidget):
         # ── 5. Post Filter & Selection Toolbar ─────────────────────────────────
         toolbar_card = QFrame()
         toolbar_card.setStyleSheet("background-color: #252830; border: 1px solid #363A45; border-radius: 6px;")
-        tool_layout = QHBoxLayout(toolbar_card)
-        tool_layout.setContentsMargins(int(8 * scale), int(6 * scale), int(8 * scale), int(6 * scale))
+        toolbar_v = QVBoxLayout(toolbar_card)
+        toolbar_v.setContentsMargins(int(8 * scale), int(6 * scale), int(8 * scale), int(6 * scale))
+        toolbar_v.setSpacing(int(6 * scale))
+
+        tool_layout = QHBoxLayout()
         tool_layout.setSpacing(int(6 * scale))
 
         # Search within posts
@@ -2014,6 +2049,79 @@ class PostsTabWidget(QWidget):
         self.view_toggle_btn.setToolTip("Toggle between Responsive Post Card Grid and Classic Table View")
         self.view_toggle_btn.clicked.connect(self._toggle_view_mode)
         tool_layout.addWidget(self.view_toggle_btn)
+
+        # Date Filter Toggle Button
+        self.date_filter_toggle_btn = QPushButton("  📅 Date Filter")
+        self.date_filter_toggle_btn.setFixedHeight(int(26 * scale))
+        self.date_filter_toggle_btn.setToolTip("Show / hide date filter controls to filter posts by published date")
+        self.date_filter_toggle_btn.clicked.connect(self._toggle_date_filter_bar)
+        tool_layout.addWidget(self.date_filter_toggle_btn)
+
+        toolbar_v.addLayout(tool_layout)
+
+        # ── Collapsible Date Filter Bar ──
+        self.date_filter_container = QWidget()
+        self.date_filter_container.setVisible(False)
+        df_row = QHBoxLayout(self.date_filter_container)
+        df_row.setContentsMargins(0, int(4 * scale), 0, 0)
+        df_row.setSpacing(int(6 * scale))
+
+        self.posts_date_filter_mode = DATE_FILTER_EXACT
+        self.posts_date_filter_checkbox = QCheckBox("Filter by Date:")
+        self.posts_date_filter_checkbox.setToolTip("Enable/disable date filtering for loaded posts")
+        self.posts_date_filter_checkbox.setChecked(False)
+        self.posts_date_filter_checkbox.toggled.connect(self._on_posts_date_filter_toggled)
+        df_row.addWidget(self.posts_date_filter_checkbox)
+
+        self.posts_date_filter_mode_btn = QPushButton("Exact Date")
+        self.posts_date_filter_mode_btn.setToolTip("Click to toggle: Exact Date, On or After, On or Before, Date Range")
+        self.posts_date_filter_mode_btn.setEnabled(False)
+        self.posts_date_filter_mode_btn.clicked.connect(self._cycle_posts_date_filter_mode)
+        df_row.addWidget(self.posts_date_filter_mode_btn)
+
+        self.posts_date_filter_start = QDateEdit()
+        self.posts_date_filter_start.setDisplayFormat("yyyy-MM-dd")
+        self.posts_date_filter_start.setCalendarPopup(True)
+        self.posts_date_filter_start.setDate(QDate.currentDate())
+        self.posts_date_filter_start.setFixedWidth(int(118 * scale))
+        self.posts_date_filter_start.setEnabled(False)
+        self.posts_date_filter_start.setToolTip("Filter date (YYYY-MM-DD)")
+        self.posts_date_filter_start.dateChanged.connect(lambda: self._apply_posts_date_filter() if self.posts_date_filter_checkbox.isChecked() else None)
+        df_row.addWidget(self.posts_date_filter_start)
+
+        self.posts_date_filter_sep = QLabel("to")
+        self.posts_date_filter_sep.setStyleSheet("color: #888888; font-weight: bold;")
+        self.posts_date_filter_sep.setVisible(False)
+        df_row.addWidget(self.posts_date_filter_sep)
+
+        self.posts_date_filter_end = QDateEdit()
+        self.posts_date_filter_end.setDisplayFormat("yyyy-MM-dd")
+        self.posts_date_filter_end.setCalendarPopup(True)
+        self.posts_date_filter_end.setDate(QDate.currentDate())
+        self.posts_date_filter_end.setFixedWidth(int(118 * scale))
+        self.posts_date_filter_end.setVisible(False)
+        self.posts_date_filter_end.setEnabled(False)
+        self.posts_date_filter_end.setToolTip("Filter end date (YYYY-MM-DD)")
+        self.posts_date_filter_end.dateChanged.connect(lambda: self._apply_posts_date_filter() if self.posts_date_filter_checkbox.isChecked() else None)
+        df_row.addWidget(self.posts_date_filter_end)
+
+        self.posts_date_filter_apply_btn = QPushButton("Apply")
+        self.posts_date_filter_apply_btn.setToolTip("Apply date filter to visible posts")
+        self.posts_date_filter_apply_btn.clicked.connect(self._apply_posts_date_filter)
+        df_row.addWidget(self.posts_date_filter_apply_btn)
+
+        self.posts_date_select_matching_btn = QPushButton("Select Filtered")
+        self.posts_date_select_matching_btn.setToolTip("Select all visible posts matching this date filter")
+        self.posts_date_select_matching_btn.clicked.connect(lambda: self.model.select_all(True))
+        df_row.addWidget(self.posts_date_select_matching_btn)
+
+        self.posts_date_filter_reset_btn = QPushButton("Reset")
+        self.posts_date_filter_reset_btn.setToolTip("Clear date filter")
+        self.posts_date_filter_reset_btn.clicked.connect(self._reset_posts_date_filter)
+        df_row.addWidget(self.posts_date_filter_reset_btn)
+
+        df_row.addStretch(1)
+        toolbar_v.addWidget(self.date_filter_container)
 
         browse_layout.addWidget(toolbar_card)
 
@@ -2351,6 +2459,8 @@ class PostsTabWidget(QWidget):
         self.post_search_input.blockSignals(True)
         self.post_search_input.clear()
         self.post_search_input.blockSignals(False)
+        if hasattr(self, '_reset_posts_date_filter'):
+            self._reset_posts_date_filter()
         self.model.set_posts([])
         self.hero_widget.set_creator(None, 0)
         self.hero_widget.setVisible(False)
@@ -2449,6 +2559,76 @@ class PostsTabWidget(QWidget):
             self._adjust_grid_columns()
             self.grid_view.viewport().update()
         self._scroll_prune_timer.start()
+
+    def _toggle_date_filter_bar(self):
+        is_vis = not self.date_filter_container.isVisible()
+        self.date_filter_container.setVisible(is_vis)
+        self.date_filter_toggle_btn.setStyleSheet(
+            "background-color: #D48378; color: #FFFFFF;" if is_vis else ""
+        )
+
+    def _cycle_posts_date_filter_mode(self):
+        modes = [DATE_FILTER_EXACT, DATE_FILTER_AFTER, DATE_FILTER_BEFORE, DATE_FILTER_RANGE]
+        curr = getattr(self, 'posts_date_filter_mode', DATE_FILTER_EXACT)
+        try:
+            nxt = modes[(modes.index(curr) + 1) % len(modes)]
+        except ValueError:
+            nxt = DATE_FILTER_EXACT
+        self.posts_date_filter_mode = nxt
+        labels = {
+            DATE_FILTER_EXACT: "Exact Date",
+            DATE_FILTER_AFTER: "On or After (≥)",
+            DATE_FILTER_BEFORE: "On or Before (≤)",
+            DATE_FILTER_RANGE: "Date Range",
+        }
+        self.posts_date_filter_mode_btn.setText(labels.get(nxt, "Exact Date"))
+        is_range = (nxt == DATE_FILTER_RANGE)
+        self.posts_date_filter_sep.setVisible(is_range)
+        self.posts_date_filter_end.setVisible(is_range)
+        is_en = self.posts_date_filter_checkbox.isChecked()
+        self.posts_date_filter_end.setEnabled(is_en and is_range)
+        if is_en:
+            self._apply_posts_date_filter()
+
+    def _on_posts_date_filter_toggled(self, checked: bool):
+        self.posts_date_filter_mode_btn.setEnabled(checked)
+        self.posts_date_filter_start.setEnabled(checked)
+        is_range = (getattr(self, 'posts_date_filter_mode', DATE_FILTER_EXACT) == DATE_FILTER_RANGE)
+        self.posts_date_filter_end.setEnabled(checked and is_range)
+        self._apply_posts_date_filter()
+
+    def _get_current_posts_date_filter(self):
+        if not hasattr(self, 'posts_date_filter_checkbox') or not self.posts_date_filter_checkbox.isChecked():
+            return None
+        return {
+            'enabled': True,
+            'mode': getattr(self, 'posts_date_filter_mode', DATE_FILTER_EXACT),
+            'start': self.posts_date_filter_start.date().toString("yyyy-MM-dd"),
+            'end': self.posts_date_filter_end.date().toString("yyyy-MM-dd"),
+        }
+
+    def _apply_posts_date_filter(self):
+        df = self._get_current_posts_date_filter()
+        query = self.post_search_input.text().strip() if hasattr(self, 'post_search_input') else ""
+        self.model.filter_posts(query=query, date_filter=df)
+        count = len(self.model._filtered_posts)
+        total = len(self.model._all_posts)
+        if df and df.get('enabled'):
+            self.status_label.setText(f"Date Filter active: Showing {count} of {total} post(s)")
+        else:
+            self.status_label.setText(f"Loaded {total} post(s)" if not query else f"Showing {count} of {total} post(s)")
+        self._update_selection_counter()
+        self._adjust_grid_columns()
+
+    def _reset_posts_date_filter(self):
+        self.posts_date_filter_checkbox.setChecked(False)
+        self.posts_date_filter_mode = DATE_FILTER_EXACT
+        self.posts_date_filter_mode_btn.setText("Exact Date")
+        self.posts_date_filter_sep.setVisible(False)
+        self.posts_date_filter_end.setVisible(False)
+        self.posts_date_filter_start.setDate(QDate.currentDate())
+        self.posts_date_filter_end.setDate(QDate.currentDate())
+        self._apply_posts_date_filter()
 
     def _on_grid_card_clicked(self, index: QModelIndex):
         """Clicking on a post card toggles checkmark selection."""
@@ -2669,6 +2849,9 @@ class PostsTabWidget(QWidget):
             self.next_page_btn.setEnabled(has_posts)
             self.load_more_btn.setEnabled(has_posts)
 
+            if hasattr(self, 'posts_date_filter_checkbox') and self.posts_date_filter_checkbox.isChecked():
+                self._apply_posts_date_filter()
+
             if hasattr(self.parent_app, 'log_signal'):
                 summary = f"across {c_count} creators" if c_count > 1 else f"for '{self.current_creators[0].get('name', 'Creator')}'"
                 self.parent_app.log_signal.emit(
@@ -2716,7 +2899,9 @@ class PostsTabWidget(QWidget):
                 # Instant restore of initial posts with zero latency
                 if self._initial_posts:
                     self.model.set_posts(self._initial_posts)
-                    count = len(self._initial_posts)
+                    if hasattr(self, 'posts_date_filter_checkbox') and self.posts_date_filter_checkbox.isChecked():
+                        self._apply_posts_date_filter()
+                    count = len(self.model._filtered_posts)
                     c_count = len(self.current_creators)
                     c_desc = f"from {c_count} creators" if c_count > 1 else ""
                     self.status_label.setText(f"Loaded {count} post(s) {c_desc}".strip())

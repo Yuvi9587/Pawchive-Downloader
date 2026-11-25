@@ -12,8 +12,46 @@ from ..utils.network_utils import extract_post_info, prepare_cookies_for_request
 from ..config.constants import (
     STYLE_DATE_POST_TITLE,
     STYLE_DATE_BASED,
-    STYLE_POST_TITLE_GLOBAL_NUMBERING
+    STYLE_POST_TITLE_GLOBAL_NUMBERING,
+    DATE_FILTER_EXACT,
+    DATE_FILTER_AFTER,
+    DATE_FILTER_BEFORE,
+    DATE_FILTER_RANGE
 )
+
+def evaluate_post_date(post, mode, start_date, end_date):
+    """
+    Evaluates whether a post matches date filter criteria.
+    Returns: (matches: bool, is_strictly_older: bool, post_date_str: str)
+    """
+    post_date_raw = post.get('published') or post.get('added') or ""
+    post_date = str(post_date_raw).strip()[:10] if len(str(post_date_raw).strip()) >= 10 else ""
+    if not post_date:
+        return False, False, ""
+
+    start_d = str(start_date).strip()[:10] if start_date else ""
+    end_d = str(end_date).strip()[:10] if end_date else start_d
+
+    if mode == DATE_FILTER_EXACT:
+        matches = (post_date == start_d)
+        is_strictly_older = bool(start_d and post_date < start_d)
+    elif mode == DATE_FILTER_AFTER:
+        matches = bool(start_d and post_date >= start_d)
+        is_strictly_older = bool(start_d and post_date < start_d)
+    elif mode == DATE_FILTER_BEFORE:
+        cutoff = end_d or start_d
+        matches = bool(cutoff and post_date <= cutoff)
+        is_strictly_older = False
+    elif mode == DATE_FILTER_RANGE:
+        s_min = min(start_d, end_d) if (start_d and end_d) else (start_d or end_d)
+        s_max = max(start_d, end_d) if (start_d and end_d) else (start_d or end_d)
+        matches = bool(s_min and s_max and s_min <= post_date <= s_max)
+        is_strictly_older = bool(s_min and post_date < s_min)
+    else:
+        matches = True
+        is_strictly_older = False
+
+    return matches, is_strictly_older, post_date
 
 _last_429_warning_time = 0
 
@@ -226,6 +264,10 @@ def download_from_api(
     processed_post_ids=None,
     fetch_all_first=False,
     proxies=None,
+    date_filter_enabled=False,
+    date_filter_mode=DATE_FILTER_EXACT,
+    date_filter_start="",
+    date_filter_end="",
     **kwargs
     ):
     parsed_input_url_for_domain = urlparse(api_url_input)
@@ -385,6 +427,24 @@ def download_from_api(
                 
                 logger(f"RENAMING_MODE_FETCH_PROGRESS:{len(all_posts_for_manga_mode)}:{current_page_num_manga}")
 
+                if date_filter_enabled:
+                    lower_bound = ""
+                    if date_filter_mode in (DATE_FILTER_EXACT, DATE_FILTER_AFTER):
+                        lower_bound = str(date_filter_start).strip()[:10] if date_filter_start else ""
+                    elif date_filter_mode == DATE_FILTER_RANGE:
+                        s_d = str(date_filter_start).strip()[:10] if date_filter_start else ""
+                        e_d = str(date_filter_end).strip()[:10] if date_filter_end else s_d
+                        lower_bound = min(s_d, e_d) if (s_d and e_d) else (s_d or e_d)
+
+                    batch_dates_manga = [
+                        p_date for p in posts_batch_manga
+                        if (p_date := str(p.get('published') or p.get('added') or '').strip()[:10])
+                    ]
+                    if lower_bound and batch_dates_manga and batch_dates_manga[-1] < lower_bound:
+                        mode_desc = f"'{date_filter_start}'" if date_filter_mode in (DATE_FILTER_EXACT, DATE_FILTER_AFTER) else f"'{date_filter_start}' to '{date_filter_end}'"
+                        logger(f"✅ Date Filter: Reached posts older than target date ({mode_desc}) on page {current_page_num_manga}. Stopping manga mode fetch.")
+                        break
+
                 current_offset_manga += page_size
                 time.sleep(0.6)
             except RuntimeError as e:
@@ -415,6 +475,12 @@ def download_from_api(
                 skipped_count = original_count - len(all_posts_for_manga_mode)
                 if skipped_count > 0:
                     logger(f"   Manga Mode: Skipped {skipped_count} already processed post(s) before sorting.")
+
+            if date_filter_enabled:
+                all_posts_for_manga_mode = [
+                    p for p in all_posts_for_manga_mode
+                    if evaluate_post_date(p, date_filter_mode, date_filter_start, date_filter_end)[0]
+                ]
 
             logger(f"   Manga Mode: Fetched {len(all_posts_for_manga_mode)} total posts. Sorting by publication date (oldest first)...")
             def sort_key_tuple(post):
@@ -525,10 +591,39 @@ def download_from_api(
                 yield [matching_post]
                 processed_target_post_flag = True
         elif not target_post_id:
+            stop_due_to_date_filter = False
+            if date_filter_enabled:
+                filtered_by_date = []
+                batch_dates = []
+                for p in posts_batch_to_yield:
+                    matches, is_older, p_date = evaluate_post_date(p, date_filter_mode, date_filter_start, date_filter_end)
+                    if p_date:
+                        batch_dates.append(p_date)
+                    if matches:
+                        filtered_by_date.append(p)
+
+                lower_bound = ""
+                if date_filter_mode in (DATE_FILTER_EXACT, DATE_FILTER_AFTER):
+                    lower_bound = str(date_filter_start).strip()[:10] if date_filter_start else ""
+                elif date_filter_mode == DATE_FILTER_RANGE:
+                    s_d = str(date_filter_start).strip()[:10] if date_filter_start else ""
+                    e_d = str(date_filter_end).strip()[:10] if date_filter_end else s_d
+                    lower_bound = min(s_d, e_d) if (s_d and e_d) else (s_d or e_d)
+
+                if lower_bound and batch_dates and batch_dates[-1] < lower_bound:
+                    stop_due_to_date_filter = True
+
+                posts_batch_to_yield = filtered_by_date
+
             if posts_batch_to_yield:
                 yield posts_batch_to_yield
-            elif original_count > 0:
-                logger(f"   No new posts found on page {current_page_num}. Checking next page...")
+            elif original_count > 0 and not stop_due_to_date_filter:
+                logger(f"   Date Filter: No matching posts on page {current_page_num}. Checking next page...")
+
+            if stop_due_to_date_filter:
+                mode_desc = f"'{date_filter_start}'" if date_filter_mode in (DATE_FILTER_EXACT, DATE_FILTER_AFTER) else f"'{date_filter_start}' to '{date_filter_end}'"
+                logger(f"✅ Date Filter: Reached posts older than target date ({mode_desc}) on page {current_page_num}. Stopping pagination.")
+                break
 
         if processed_target_post_flag:
             break

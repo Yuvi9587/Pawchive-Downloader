@@ -3,9 +3,9 @@ import os
 from PySide6.QtWidgets import (
     QSplitter, QScrollArea, QFrame, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QStackedWidget, QButtonGroup, QRadioButton, QCheckBox,
-    QListWidget, QTextEdit, QApplication, QSizePolicy, QToolButton
+    QListWidget, QTextEdit, QApplication, QSizePolicy, QToolButton, QDateEdit
 )
-from PySide6.QtCore import Qt, QSize, QUrl, QTimer
+from PySide6.QtCore import Qt, QSize, QUrl, QTimer, QDate
 from PySide6.QtGui import QIntValidator, QFont, QIcon, QPixmap, QDesktopServices
 
 from ..config.constants import *
@@ -175,10 +175,75 @@ def setup_ui(main_app):
     left_scroll.setWidget(left_widget)
 
     # ── Section 1: URL ────────────────────────────────────────────────────────
-    lv.addWidget(_field_label(
+    url_title_row = QHBoxLayout()
+    url_title_row.setContentsMargins(0, 0, 0, 0)
+    url_title_row.setSpacing(int(6 * scale))
+
+    main_app.url_title_label = _field_label(
         f"<img src='{get_asset_html_path('assets/Svg/link.svg')}' "
         f"width='{int(15 * scale)}' height='{int(15 * scale)}' align='top'>&nbsp; Creator / Post (Pawchive URL)"
-    ))
+    )
+    url_title_row.addWidget(main_app.url_title_label)
+    url_title_row.addStretch(1)
+
+    # ── Date Filter (placed on top title row) ──
+    main_app.date_filter_checkbox = QCheckBox(main_app._tr("date_filter_checkbox_text", "Filter Date:"))
+    main_app.date_filter_checkbox.setToolTip(main_app._tr("date_filter_checkbox_tooltip", "Only download posts matching the selected date or range."))
+    main_app.date_filter_checkbox.setChecked(getattr(main_app, 'date_filter_enabled', False))
+    url_title_row.addWidget(main_app.date_filter_checkbox)
+
+    main_app.date_filter_mode_button = QPushButton()
+    main_app.date_filter_mode_button.setObjectName("FilterScopeButton")
+    main_app.date_filter_mode_button.setToolTip("Click to toggle date filter mode (Exact Date, On or After, On or Before, Date Range)")
+    main_app._update_date_filter_mode_button_text()
+    main_app.date_filter_mode_button.clicked.connect(main_app._on_date_filter_mode_clicked)
+    url_title_row.addWidget(main_app.date_filter_mode_button)
+
+    main_app.date_filter_start_input = QDateEdit()
+    main_app.date_filter_start_input.setDisplayFormat("yyyy-MM-dd")
+    main_app.date_filter_start_input.setCalendarPopup(True)
+    main_app.date_filter_start_input.setFixedWidth(int(118 * scale))
+    main_app.date_filter_start_input.setToolTip("Filter date (YYYY-MM-DD)")
+    start_str = getattr(main_app, 'date_filter_start', '')
+    init_start = QDate.fromString(start_str, "yyyy-MM-dd") if start_str else QDate.currentDate()
+    if not init_start.isValid():
+        init_start = QDate.currentDate()
+    main_app.date_filter_start_input.setDate(init_start)
+    main_app.date_filter_start_input.dateChanged.connect(
+        lambda d: main_app.settings.setValue(DATE_FILTER_START_KEY, d.toString("yyyy-MM-dd"))
+    )
+    url_title_row.addWidget(main_app.date_filter_start_input)
+
+    main_app.date_filter_sep_label = QLabel("to")
+    main_app.date_filter_sep_label.setStyleSheet("color: #888888; font-weight: bold;")
+    url_title_row.addWidget(main_app.date_filter_sep_label)
+
+    main_app.date_filter_end_input = QDateEdit()
+    main_app.date_filter_end_input.setDisplayFormat("yyyy-MM-dd")
+    main_app.date_filter_end_input.setCalendarPopup(True)
+    main_app.date_filter_end_input.setFixedWidth(int(118 * scale))
+    main_app.date_filter_end_input.setToolTip("Filter end date (YYYY-MM-DD)")
+    end_str = getattr(main_app, 'date_filter_end', '')
+    init_end = QDate.fromString(end_str, "yyyy-MM-dd") if end_str else QDate.currentDate()
+    if not init_end.isValid():
+        init_end = QDate.currentDate()
+    main_app.date_filter_end_input.setDate(init_end)
+    main_app.date_filter_end_input.dateChanged.connect(
+        lambda d: main_app.settings.setValue(DATE_FILTER_END_KEY, d.toString("yyyy-MM-dd"))
+    )
+    url_title_row.addWidget(main_app.date_filter_end_input)
+
+    is_df_enabled = getattr(main_app, 'date_filter_enabled', False)
+    main_app.date_filter_mode_button.setEnabled(is_df_enabled)
+    main_app.date_filter_start_input.setEnabled(is_df_enabled)
+    is_range = (getattr(main_app, 'date_filter_mode', DATE_FILTER_EXACT) == DATE_FILTER_RANGE)
+    main_app.date_filter_sep_label.setVisible(is_range)
+    main_app.date_filter_end_input.setVisible(is_range)
+    main_app.date_filter_end_input.setEnabled(is_df_enabled and is_range)
+
+    main_app.date_filter_checkbox.toggled.connect(main_app._on_date_filter_checkbox_toggled)
+
+    lv.addLayout(url_title_row)
 
     # URL input widget (stacked with favourite placeholder)
     main_app.url_input_widget = QWidget()
@@ -1008,10 +1073,13 @@ def get_dark_theme(scale=1):
     fs_field = round(8.0 * 1.25 * scale, 1)  # blue field heading font size (+25%)
     fs_sec   = round(8.5 * 1.25 * scale, 1)  # blue section heading font size (+25%)
     pad_le   = int(5  * scale)        # line-edit padding
-    pad_bv  = int(5  * scale)        # button vertical padding
-    pad_bh  = int(11 * scale)        # button horizontal padding
-    pad_tt  = int(4  * scale)        # tooltip padding
-    sb_w    = int(7  * scale)        # scrollbar thickness
+    pad_de_v = max(1, pad_le - 2)     # date-edit vertical padding (matches QLineEdit height)
+    pad_de_r = int(22 * scale)        # date-edit right padding (clear drop-down button)
+    pad_de_l = int(6  * scale)        # date-edit left padding
+    pad_bv   = pad_le + 1             # button vertical padding (matches QLineEdit height)
+    pad_bh   = int(11 * scale)        # button horizontal padding
+    pad_tt   = int(4  * scale)        # tooltip padding
+    sb_w     = int(7  * scale)        # scrollbar thickness
 
     return f"""
     /* ── Base ─────────────────────────────────────────────────── */
@@ -1033,6 +1101,32 @@ def get_dark_theme(scale=1):
     }}
     QLineEdit:focus, QListWidget:focus, QTextEdit:focus {{
         border-color: #D48378;
+    }}
+    QDateEdit {{
+        background-color: #363237;
+        border: 1px solid #524B53;
+        padding: {pad_de_v}px {pad_de_r}px {pad_de_v}px {pad_de_l}px;
+        color: #F0F0F0;
+        border-radius: 4px;
+        font-size: {fs}pt;
+    }}
+    QDateEdit:focus {{
+        border-color: #D48378;
+    }}
+    QDateEdit::drop-down {{
+        subcontrol-origin: padding;
+        subcontrol-position: top right;
+        width: {int(18 * scale)}px;
+        border-left: 1px solid #524B53;
+    }}
+    QCalendarWidget QWidget {{
+        background-color: #272528;
+        color: #DFE1E5;
+    }}
+    QCalendarWidget QTableView {{
+        background-color: #363237;
+        selection-background-color: #D48378;
+        selection-color: #FFFFFF;
     }}
     QLineEdit::placeholder {{ color: #827A81; }}
     QTextEdit {{ font-family: Consolas, Courier New, monospace; }}

@@ -1,4 +1,4 @@
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.1.0"
 
 CONFIG_ORGANIZATION_NAME = "KemonoDownloader"
 CONFIG_APP_NAME_MAIN = "ApplicationSettings"
@@ -23,6 +23,11 @@ CHAR_SCOPE_COMMENTS = "comments"
 
 FOLDER_SCOPE_TARGET = "target"
 FOLDER_SCOPE_CREATOR = "creator"
+
+DATE_FILTER_EXACT = "exact"
+DATE_FILTER_AFTER = "after"
+DATE_FILTER_BEFORE = "before"
+DATE_FILTER_RANGE = "range"
 
 FAVORITE_SCOPE_SELECTED_LOCATION = "selected_location"
 FAVORITE_SCOPE_ARTIST_FOLDERS = "artist_folders"
@@ -52,6 +57,10 @@ MANGA_CUSTOM_DATE_FORMAT_KEY = "mangaCustomDateFormatV1"
 MANGA_CUSTOM_SUFFIX_FORMAT_KEY = "mangaCustomSuffixFormatV1"
 SKIP_WORDS_SCOPE_KEY = "skipWordsScopeV1"
 FOLDER_SCOPE_KEY = "folderScopeV1"
+DATE_FILTER_ENABLED_KEY = "dateFilterEnabledV1"
+DATE_FILTER_MODE_KEY = "dateFilterModeV1"
+DATE_FILTER_START_KEY = "dateFilterStartV1"
+DATE_FILTER_END_KEY = "dateFilterEndV1"
 ALLOW_MULTIPART_DOWNLOAD_KEY = "allowMultipartDownloadV1"
 USE_COOKIE_KEY = "useCookieV1"
 COOKIE_TEXT_KEY = "cookieTextV1"
