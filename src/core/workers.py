@@ -2498,7 +2498,8 @@ class PostProcessorWorker:
                 file_path = post_main_file_info['path'].lstrip('/')
                 original_api_name = post_main_file_info.get('name') or os.path.basename(file_path)
                 if original_api_name:
-                    final_url = post_main_file_info.get('url')
+                    # Pawchive preview_only files exist only behind the signed temp_url (file server returns 404).
+                    final_url = post_main_file_info.get('url') or post_main_file_info.get('temp_url')
                     if not final_url or not final_url.startswith('http'):
                         final_url = f"https://{api_file_domain}/{file_path}" if file_path.startswith('/') else f"https://{api_file_domain}/data/{file_path}"
                         final_url += f"?f={urllib.parse.quote(original_api_name)}"
@@ -2521,7 +2522,7 @@ class PostProcessorWorker:
                     att_path = att_info['path'].lstrip('/')
                     original_api_att_name = att_info.get('name') or os.path.basename(att_path)
                     if original_api_att_name:
-                        final_url = att_info.get('url')
+                        final_url = att_info.get('url') or att_info.get('temp_url')
                         if not final_url or not final_url.startswith('http'):
                             final_url = f"https://{api_file_domain}/{att_path}" if att_path.startswith('/') else f"https://{api_file_domain}/data/{att_path}"
                             final_url += f"?f={urllib.parse.quote(original_api_att_name)}"
