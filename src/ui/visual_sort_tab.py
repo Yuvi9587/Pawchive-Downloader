@@ -1,4 +1,5 @@
 import os
+import sys
 import requests
 
 from PySide6.QtWidgets import (
